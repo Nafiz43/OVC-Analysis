@@ -1,5 +1,0 @@
-pandas 
-openpyxl 
-pyvis
-wordcloud 
-matplotlib
