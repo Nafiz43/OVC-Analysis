@@ -1,3 +1,6 @@
+"""Extracts structured biomarker information from PDF articles using an LLM.
+Outputs Markdown, text, and CSV files with the extracted data."""
+
 import os
 import re
 import csv
