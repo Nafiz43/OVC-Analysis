@@ -7,6 +7,7 @@ This repository contains resources and visualizations for the OVC analysis.
 ## Repository Overview
 
 - `Pilot_Study_Analysis.ipynb`: Jupyter notebook exploring the pilot study data.
+- `code/article_findings_analysis.py`: LLM pipeline to extract per-article findings tied to a fixed good-prognosis gene list.
 - `nets/`: Network data used for visualizations.
 - `index.html`, `pilot_study.html`, `pilot_study_net_graph.html`: Interactive graph visualizations.
 - `style5.css`: Stylesheet for the visualizations.
