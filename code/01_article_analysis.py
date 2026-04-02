@@ -9,6 +9,11 @@ a single CSV.
 LLM engine:
     ollama run qwen2.5:72b
 
+Outputs:
+1. Main CSV with extracted rows
+2. Log file for articles with NO findings
+3. Run summary stats file
+
 Output CSV columns:
 - Actionable/Findings
 - Evidence
@@ -28,6 +33,7 @@ import time
 import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from collections import Counter, defaultdict
 
 
 # ============================================================
@@ -38,12 +44,14 @@ DEFAULT_MD_DIR = Path("/Users/nafiz43/Documents/GitHub/OVC-Analysis/code/data/ac
 DEFAULT_OUTPUT_DIR = Path("/Users/nafiz43/Documents/GitHub/OVC-Analysis/code/data/results")
 DEFAULT_OUTPUT_CSV = DEFAULT_OUTPUT_DIR / "actionable_findings_extracted.csv"
 DEFAULT_PROGRESS_LOG = DEFAULT_OUTPUT_DIR / "actionable_findings_progress.log"
+DEFAULT_NO_FINDINGS_LOG = DEFAULT_OUTPUT_DIR / "articles_with_no_actionables.csv"
+DEFAULT_STATS_FILE = DEFAULT_OUTPUT_DIR / "actionable_extraction_stats.txt"
 
-DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_MODEL = "llama3:8b"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_SLEEP_BETWEEN_FILES = 0.5
 DEFAULT_MAX_CHARS_PER_ARTICLE = 120000
-DEFAULT_OLLAMA_TIMEOUT_SEC = 1800  # 30 min per article if needed
+DEFAULT_OLLAMA_TIMEOUT_SEC = 1800  # 30 minutes
 
 CSV_COLUMNS = [
     "Actionable/Findings",
@@ -52,6 +60,13 @@ CSV_COLUMNS = [
     "Article Year",
     "Dictionary Group",
     "Phrases from the dictionary",
+]
+
+NO_FINDINGS_COLUMNS = [
+    "Filename",
+    "Article Title Guess",
+    "Article Year Guess",
+    "Reason",
 ]
 
 DICTIONARY_GROUPS = {
@@ -181,6 +196,7 @@ STRICT RULES
 - If there is not enough evidence for a finding, do not include it.
 - If the article contains no relevant findings, return [].
 - Choose the single best Dictionary Group per finding.
+- Prefer precision over recall, but do not ignore clearly relevant findings.
 
 DICTIONARY GROUPS
 
@@ -213,6 +229,14 @@ def ensure_output_csv_exists(output_csv: Path) -> None:
             writer.writeheader()
 
 
+def ensure_no_findings_csv_exists(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=NO_FINDINGS_COLUMNS)
+            writer.writeheader()
+
+
 def normalize_phrase_list(value: Any) -> str:
     if isinstance(value, list):
         return "; ".join(str(x).strip() for x in value if str(x).strip())
@@ -236,6 +260,17 @@ def append_rows_to_csv(output_csv: Path, rows: List[Dict[str, Any]]) -> None:
                 "Dictionary Group": str(row.get("Dictionary Group", "")).strip(),
                 "Phrases from the dictionary": normalize_phrase_list(row.get("Phrases from the dictionary", [])),
             })
+
+
+def append_no_findings_row(path: Path, filename: str, title_guess: str, year_guess: str, reason: str) -> None:
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=NO_FINDINGS_COLUMNS)
+        writer.writerow({
+            "Filename": filename,
+            "Article Title Guess": title_guess,
+            "Article Year Guess": year_guess,
+            "Reason": reason,
+        })
 
 
 def load_completed_files(progress_log: Path) -> set[str]:
@@ -372,12 +407,6 @@ def call_ollama_cli(
     timeout_sec: int,
     max_retries: int,
 ) -> List[Dict[str, Any]]:
-    """
-    Uses Ollama CLI directly:
-        ollama run qwen2.5:72b
-
-    Prompt is passed via stdin.
-    """
     last_err = None
 
     for attempt in range(1, max_retries + 1):
@@ -419,15 +448,32 @@ def call_ollama_cli(
 def process_single_markdown(
     md_path: Path,
     output_csv: Path,
+    no_findings_log: Path,
     model: str,
     max_chars_per_article: int,
     timeout_sec: int,
     max_retries: int,
-) -> int:
+) -> Dict[str, Any]:
+    """
+    Returns a dictionary with processing summary for this file.
+    """
     text = safe_read_text(md_path).strip()
     if not text:
-        print(f"[INFO] Empty markdown, skipping: {md_path.name}")
-        return 0
+        title_guess, year_guess = md_path.stem, ""
+        append_no_findings_row(
+            no_findings_log,
+            filename=md_path.name,
+            title_guess=title_guess,
+            year_guess=year_guess,
+            reason="Empty markdown file",
+        )
+        return {
+            "rows_written": 0,
+            "title_guess": title_guess,
+            "year_guess": year_guess,
+            "status": "no_findings",
+            "reason": "Empty markdown file",
+        }
 
     if len(text) > max_chars_per_article:
         print(f"[WARN] {md_path.name} is long ({len(text)} chars). Truncating to {max_chars_per_article} chars.")
@@ -453,8 +499,153 @@ def process_single_markdown(
         fallback_year=year_guess,
     )
 
+    if not valid_rows:
+        append_no_findings_row(
+            no_findings_log,
+            filename=md_path.name,
+            title_guess=title_guess,
+            year_guess=year_guess,
+            reason="Model returned no valid actionable findings",
+        )
+        return {
+            "rows_written": 0,
+            "title_guess": title_guess,
+            "year_guess": year_guess,
+            "status": "no_findings",
+            "reason": "Model returned no valid actionable findings",
+        }
+
     append_rows_to_csv(output_csv, valid_rows)
-    return len(valid_rows)
+
+    return {
+        "rows_written": len(valid_rows),
+        "title_guess": title_guess,
+        "year_guess": year_guess,
+        "status": "with_findings",
+        "reason": "",
+        "rows": valid_rows,
+    }
+
+
+# ============================================================
+# STATS
+# ============================================================
+
+def compute_stats(all_results: List[Dict[str, Any]]) -> str:
+    """
+    Build a comprehensive human-readable stats summary.
+    """
+    processed_articles = [r for r in all_results if r["status"] != "error"]
+    errored_articles = [r for r in all_results if r["status"] == "error"]
+    with_findings = [r for r in all_results if r["status"] == "with_findings"]
+    without_findings = [r for r in all_results if r["status"] == "no_findings"]
+
+    total_actionables = sum(r.get("rows_written", 0) for r in with_findings)
+
+    group_counter = Counter()
+    article_year_counter = Counter()
+    phrases_counter = Counter()
+    actionables_per_article = []
+    articles_per_group = defaultdict(set)
+
+    for result in with_findings:
+        rows = result.get("rows", [])
+        actionables_per_article.append(len(rows))
+        for row in rows:
+            group = row.get("Dictionary Group", "").strip()
+            year = row.get("Article Year", "").strip()
+            title = row.get("Article Title", "").strip()
+            phrases = row.get("Phrases from the dictionary", [])
+
+            if group:
+                group_counter[group] += 1
+                if title:
+                    articles_per_group[group].add(title)
+
+            if year:
+                article_year_counter[year] += 1
+
+            if isinstance(phrases, list):
+                for p in phrases:
+                    if str(p).strip():
+                        phrases_counter[str(p).strip()] += 1
+
+    avg_actionables = (sum(actionables_per_article) / len(actionables_per_article)) if actionables_per_article else 0.0
+    max_actionables = max(actionables_per_article) if actionables_per_article else 0
+    min_actionables = min(actionables_per_article) if actionables_per_article else 0
+
+    lines = []
+    lines.append("===== ACTIONABLE EXTRACTION SUMMARY =====")
+    lines.append("")
+    lines.append(f"Total articles processed successfully: {len(processed_articles)}")
+    lines.append(f"Total articles with actionables: {len(with_findings)}")
+    lines.append(f"Total articles without actionables: {len(without_findings)}")
+    lines.append(f"Total errored articles: {len(errored_articles)}")
+    lines.append(f"Total actionables extracted: {total_actionables}")
+    lines.append("")
+
+    if processed_articles:
+        pct_with = 100.0 * len(with_findings) / len(processed_articles)
+        pct_without = 100.0 * len(without_findings) / len(processed_articles)
+        lines.append(f"Percent of processed articles with actionables: {pct_with:.2f}%")
+        lines.append(f"Percent of processed articles without actionables: {pct_without:.2f}%")
+        lines.append("")
+
+    lines.append("----- Actionable count per dictionary group -----")
+    for group in DICTIONARY_GROUPS.keys():
+        lines.append(f"{group}: {group_counter.get(group, 0)}")
+    lines.append("")
+
+    lines.append("----- Number of unique articles contributing to each dictionary group -----")
+    for group in DICTIONARY_GROUPS.keys():
+        lines.append(f"{group}: {len(articles_per_group.get(group, set()))}")
+    lines.append("")
+
+    lines.append("----- Actionables per article -----")
+    lines.append(f"Average actionables/article (among articles with findings): {avg_actionables:.2f}")
+    lines.append(f"Min actionables in an article: {min_actionables}")
+    lines.append(f"Max actionables in an article: {max_actionables}")
+    lines.append("")
+
+    if article_year_counter:
+        lines.append("----- Actionables by article year -----")
+        for year in sorted(article_year_counter.keys()):
+            lines.append(f"{year}: {article_year_counter[year]}")
+        lines.append("")
+
+    if phrases_counter:
+        lines.append("----- Most frequently matched dictionary phrases -----")
+        for phrase, count in phrases_counter.most_common(20):
+            lines.append(f"{phrase}: {count}")
+        lines.append("")
+
+    if with_findings:
+        sorted_by_rows = sorted(with_findings, key=lambda x: x.get("rows_written", 0), reverse=True)
+        lines.append("----- Top articles by number of extracted actionables -----")
+        for item in sorted_by_rows[:15]:
+            lines.append(f"{item.get('title_guess', '')} ({item.get('year_guess', '')}) -> {item.get('rows_written', 0)}")
+        lines.append("")
+
+    if without_findings:
+        lines.append("----- Articles without actionables -----")
+        for item in without_findings[:50]:
+            lines.append(f"{item.get('title_guess', '')} ({item.get('year_guess', '')}) | {item.get('reason', '')}")
+        if len(without_findings) > 50:
+            lines.append(f"... and {len(without_findings) - 50} more")
+        lines.append("")
+
+    if errored_articles:
+        lines.append("----- Errored articles -----")
+        for item in errored_articles:
+            lines.append(f"{item.get('filename', '')} | {item.get('reason', '')}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def write_stats_file(stats_file: Path, text: str) -> None:
+    stats_file.parent.mkdir(parents=True, exist_ok=True)
+    stats_file.write_text(text, encoding="utf-8")
 
 
 # ============================================================
@@ -468,6 +659,8 @@ def parse_args():
     parser.add_argument("--md_dir", type=Path, default=DEFAULT_MD_DIR, help="Directory containing markdown files.")
     parser.add_argument("--output_csv", type=Path, default=DEFAULT_OUTPUT_CSV, help="Output CSV path.")
     parser.add_argument("--progress_log", type=Path, default=DEFAULT_PROGRESS_LOG, help="Progress log path.")
+    parser.add_argument("--no_findings_log", type=Path, default=DEFAULT_NO_FINDINGS_LOG, help="CSV log for articles without findings.")
+    parser.add_argument("--stats_file", type=Path, default=DEFAULT_STATS_FILE, help="Output summary stats text file.")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="Ollama model name.")
     parser.add_argument("--max_retries", type=int, default=DEFAULT_MAX_RETRIES, help="Max retries per file.")
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP_BETWEEN_FILES, help="Sleep between files.")
@@ -490,6 +683,7 @@ def main():
 
     check_ollama_available()
     ensure_output_csv_exists(args.output_csv)
+    ensure_no_findings_csv_exists(args.no_findings_log)
 
     completed = load_completed_files(args.progress_log) if args.resume else set()
 
@@ -497,10 +691,13 @@ def main():
     processed_count = 0
     skipped_count = 0
     error_count = 0
+    all_results: List[Dict[str, Any]] = []
 
     print(f"[INFO] Found {len(md_files)} markdown files")
     print(f"[INFO] Model: {args.model}")
     print(f"[INFO] Output CSV: {args.output_csv}")
+    print(f"[INFO] No-findings log: {args.no_findings_log}")
+    print(f"[INFO] Stats file: {args.stats_file}")
 
     for idx, md_path in enumerate(md_files, start=1):
         if args.resume and md_path.name in completed:
@@ -511,23 +708,45 @@ def main():
         print(f"[INFO] [{idx}/{len(md_files)}] Processing {md_path.name}")
 
         try:
-            n_rows = process_single_markdown(
+            result = process_single_markdown(
                 md_path=md_path,
                 output_csv=args.output_csv,
+                no_findings_log=args.no_findings_log,
                 model=args.model,
                 max_chars_per_article=args.max_chars_per_article,
                 timeout_sec=args.timeout_sec,
                 max_retries=args.max_retries,
             )
+
+            result["filename"] = md_path.name
+            all_results.append(result)
+
             mark_file_completed(args.progress_log, md_path.name)
-            total_rows += n_rows
+            total_rows += result.get("rows_written", 0)
             processed_count += 1
-            print(f"[DONE] {md_path.name} -> {n_rows} row(s)")
+
+            if result["status"] == "with_findings":
+                print(f"[DONE] {md_path.name} -> {result['rows_written']} row(s)")
+            else:
+                print(f"[NO_FINDINGS] {md_path.name} -> logged separately")
+
         except Exception as e:
             error_count += 1
+            err_result = {
+                "filename": md_path.name,
+                "rows_written": 0,
+                "title_guess": md_path.stem,
+                "year_guess": "",
+                "status": "error",
+                "reason": str(e),
+            }
+            all_results.append(err_result)
             print(f"[ERROR] {md_path.name}: {e}")
 
         time.sleep(args.sleep)
+
+    stats_text = compute_stats(all_results)
+    write_stats_file(args.stats_file, stats_text)
 
     print("\n===== SUMMARY =====")
     print(f"Processed files : {processed_count}")
@@ -535,6 +754,10 @@ def main():
     print(f"Errored files   : {error_count}")
     print(f"Rows written    : {total_rows}")
     print(f"CSV             : {args.output_csv}")
+    print(f"No-findings log : {args.no_findings_log}")
+    print(f"Stats file      : {args.stats_file}")
+    print("")
+    print(stats_text)
 
 
 if __name__ == "__main__":
