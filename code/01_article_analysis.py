@@ -47,7 +47,7 @@ DEFAULT_PROGRESS_LOG = DEFAULT_OUTPUT_DIR / "actionable_findings_progress.log"
 DEFAULT_NO_FINDINGS_LOG = DEFAULT_OUTPUT_DIR / "articles_with_no_actionables.csv"
 DEFAULT_STATS_FILE = DEFAULT_OUTPUT_DIR / "actionable_extraction_stats.txt"
 
-DEFAULT_MODEL = "llama3:8b"
+DEFAULT_MODEL = "qwen2.5:72b"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_SLEEP_BETWEEN_FILES = 0.5
 DEFAULT_MAX_CHARS_PER_ARTICLE = 120000
@@ -115,7 +115,7 @@ DICTIONARY_GROUPS = {
 
 
 # ============================================================
-# PROMPT
+# PROMPTS
 # ============================================================
 
 def build_extraction_prompt(article_text: str, article_title_guess: str, article_year_guess: str) -> str:
@@ -205,6 +205,38 @@ DICTIONARY GROUPS
 ARTICLE MARKDOWN
 
 {article_text}
+""".strip()
+
+
+def build_json_repair_prompt(raw_response: str) -> str:
+    return f"""
+You are a strict JSON formatter.
+
+Your task is to convert the following model output into a valid JSON array.
+
+Rules:
+- Return ONLY valid JSON.
+- Do NOT include markdown fences.
+- Do NOT include explanation.
+- Do NOT add new findings that are not already present in the content.
+- Preserve the original meaning as much as possible.
+- If the content clearly contains no findings, return [].
+- The output must be a JSON array of objects with exactly these keys:
+
+[
+  {{
+    "Actionable/Findings": "...",
+    "Evidence": "...",
+    "Article Title": "...",
+    "Article Year": "...",
+    "Dictionary Group": "...",
+    "Phrases from the dictionary": ["...", "..."]
+  }}
+]
+
+Here is the raw model output to repair:
+
+{raw_response}
 """.strip()
 
 
@@ -332,9 +364,12 @@ def validate_dictionary_group(group: str) -> bool:
     return group in DICTIONARY_GROUPS
 
 
-def filter_and_validate_rows(rows: List[Dict[str, Any]], fallback_title: str, fallback_year: str) -> List[Dict[str, Any]]:
+def filter_and_validate_rows(rows: List[Dict[str, Any]], fallback_title: str, fallback_year: str) -> Tuple[List[Dict[str, Any]], str]:
     valid_rows: List[Dict[str, Any]] = []
     seen = set()
+
+    if not rows:
+        return [], "returned_empty_array"
 
     for row in rows:
         if not isinstance(row, dict):
@@ -377,11 +412,14 @@ def filter_and_validate_rows(rows: List[Dict[str, Any]], fallback_title: str, fa
             "Phrases from the dictionary": phrases,
         })
 
-    return valid_rows
+    if not valid_rows:
+        return [], "all_rows_failed_validation"
+
+    return valid_rows, "valid_rows_found"
 
 
 # ============================================================
-# OLLAMA CLI CALL
+# OLLAMA CLI CALLS
 # ============================================================
 
 def check_ollama_available() -> None:
@@ -401,37 +439,81 @@ def check_ollama_available() -> None:
         ) from e
 
 
+def run_ollama_raw(prompt: str, model: str, timeout_sec: int) -> str:
+    proc = subprocess.run(
+        ["ollama", "run", model],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+        check=False,
+    )
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Ollama exited with code {proc.returncode}. stderr: {stderr[:1000]}"
+        )
+
+    if not stdout:
+        raise RuntimeError(f"Ollama returned empty stdout. stderr: {stderr[:1000]}")
+
+    return stdout
+
+
+def parse_with_json_repair(
+    raw_output: str,
+    model: str,
+    timeout_sec: int,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Try parsing raw output directly.
+    If it fails, make one extra Ollama call to convert the raw output into valid JSON.
+    Returns:
+        (rows, parse_mode)
+    where parse_mode is one of:
+        - "direct"
+        - "repaired"
+    """
+    try:
+        return extract_json_array(raw_output), "direct"
+    except Exception:
+        repair_prompt = build_json_repair_prompt(raw_output)
+        repaired_output = run_ollama_raw(
+            prompt=repair_prompt,
+            model=model,
+            timeout_sec=timeout_sec,
+        )
+        return extract_json_array(repaired_output), "repaired"
+
+
 def call_ollama_cli(
     prompt: str,
     model: str,
     timeout_sec: int,
     max_retries: int,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Returns:
+        rows, parse_mode
+    """
     last_err = None
 
     for attempt in range(1, max_retries + 1):
         try:
-            proc = subprocess.run(
-                ["ollama", "run", model],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-                check=False,
+            raw_output = run_ollama_raw(
+                prompt=prompt,
+                model=model,
+                timeout_sec=timeout_sec,
             )
 
-            stdout = (proc.stdout or "").strip()
-            stderr = (proc.stderr or "").strip()
-
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"Ollama exited with code {proc.returncode}. stderr: {stderr[:1000]}"
-                )
-
-            if not stdout:
-                raise RuntimeError(f"Ollama returned empty stdout. stderr: {stderr[:1000]}")
-
-            return extract_json_array(stdout)
+            return parse_with_json_repair(
+                raw_output=raw_output,
+                model=model,
+                timeout_sec=timeout_sec,
+            )
 
         except Exception as e:
             last_err = e
@@ -473,6 +555,9 @@ def process_single_markdown(
             "year_guess": year_guess,
             "status": "no_findings",
             "reason": "Empty markdown file",
+            "rows": [],
+            "parse_mode": "not_applicable",
+            "validation_status": "empty_markdown",
         }
 
     if len(text) > max_chars_per_article:
@@ -486,33 +571,43 @@ def process_single_markdown(
         article_year_guess=year_guess,
     )
 
-    raw_rows = call_ollama_cli(
+    raw_rows, parse_mode = call_ollama_cli(
         prompt=prompt,
         model=model,
         timeout_sec=timeout_sec,
         max_retries=max_retries,
     )
 
-    valid_rows = filter_and_validate_rows(
+    valid_rows, validation_status = filter_and_validate_rows(
         raw_rows,
         fallback_title=title_guess,
         fallback_year=year_guess,
     )
 
     if not valid_rows:
+        if validation_status == "returned_empty_array":
+            reason = "Model returned empty JSON array"
+        elif validation_status == "all_rows_failed_validation":
+            reason = "Model returned rows, but all failed validation"
+        else:
+            reason = "Model returned no valid actionable findings"
+
         append_no_findings_row(
             no_findings_log,
             filename=md_path.name,
             title_guess=title_guess,
             year_guess=year_guess,
-            reason="Model returned no valid actionable findings",
+            reason=reason,
         )
         return {
             "rows_written": 0,
             "title_guess": title_guess,
             "year_guess": year_guess,
             "status": "no_findings",
-            "reason": "Model returned no valid actionable findings",
+            "reason": reason,
+            "rows": [],
+            "parse_mode": parse_mode,
+            "validation_status": validation_status,
         }
 
     append_rows_to_csv(output_csv, valid_rows)
@@ -524,6 +619,8 @@ def process_single_markdown(
         "status": "with_findings",
         "reason": "",
         "rows": valid_rows,
+        "parse_mode": parse_mode,
+        "validation_status": validation_status,
     }
 
 
@@ -532,9 +629,6 @@ def process_single_markdown(
 # ============================================================
 
 def compute_stats(all_results: List[Dict[str, Any]]) -> str:
-    """
-    Build a comprehensive human-readable stats summary.
-    """
     processed_articles = [r for r in all_results if r["status"] != "error"]
     errored_articles = [r for r in all_results if r["status"] == "error"]
     with_findings = [r for r in all_results if r["status"] == "with_findings"]
@@ -547,6 +641,21 @@ def compute_stats(all_results: List[Dict[str, Any]]) -> str:
     phrases_counter = Counter()
     actionables_per_article = []
     articles_per_group = defaultdict(set)
+    parse_mode_counter = Counter()
+    no_findings_reason_counter = Counter()
+    validation_status_counter = Counter()
+
+    for result in all_results:
+        parse_mode = result.get("parse_mode", "")
+        validation_status = result.get("validation_status", "")
+        reason = result.get("reason", "")
+
+        if parse_mode:
+            parse_mode_counter[parse_mode] += 1
+        if validation_status:
+            validation_status_counter[validation_status] += 1
+        if result.get("status") == "no_findings" and reason:
+            no_findings_reason_counter[reason] += 1
 
     for result in with_findings:
         rows = result.get("rows", [])
@@ -590,6 +699,22 @@ def compute_stats(all_results: List[Dict[str, Any]]) -> str:
         lines.append(f"Percent of processed articles with actionables: {pct_with:.2f}%")
         lines.append(f"Percent of processed articles without actionables: {pct_without:.2f}%")
         lines.append("")
+
+    lines.append("----- JSON parsing mode counts -----")
+    for mode in ["direct", "repaired", "not_applicable"]:
+        if mode in parse_mode_counter:
+            lines.append(f"{mode}: {parse_mode_counter[mode]}")
+    lines.append("")
+
+    lines.append("----- Validation status counts -----")
+    for key, value in validation_status_counter.items():
+        lines.append(f"{key}: {value}")
+    lines.append("")
+
+    lines.append("----- No-findings reason counts -----")
+    for key, value in no_findings_reason_counter.items():
+        lines.append(f"{key}: {value}")
+    lines.append("")
 
     lines.append("----- Actionable count per dictionary group -----")
     for group in DICTIONARY_GROUPS.keys():
@@ -726,9 +851,12 @@ def main():
             processed_count += 1
 
             if result["status"] == "with_findings":
-                print(f"[DONE] {md_path.name} -> {result['rows_written']} row(s)")
+                parse_mode = result.get("parse_mode", "unknown")
+                print(f"[DONE] {md_path.name} -> {result['rows_written']} row(s) | parse_mode={parse_mode}")
             else:
-                print(f"[NO_FINDINGS] {md_path.name} -> logged separately")
+                reason = result.get("reason", "")
+                parse_mode = result.get("parse_mode", "unknown")
+                print(f"[NO_FINDINGS] {md_path.name} -> logged separately | reason={reason} | parse_mode={parse_mode}")
 
         except Exception as e:
             error_count += 1
@@ -739,6 +867,9 @@ def main():
                 "year_guess": "",
                 "status": "error",
                 "reason": str(e),
+                "rows": [],
+                "parse_mode": "error",
+                "validation_status": "error",
             }
             all_results.append(err_result)
             print(f"[ERROR] {md_path.name}: {e}")
