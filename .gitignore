@@ -6,3 +6,4 @@ code/actionable-articles-preprocessed
 ../data
 code/.env
 code/data
+.DS_Store

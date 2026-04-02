@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Gene–Actionable Network Explorer</title>
+
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #dbe4f0;
+      --shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+      --gene: #6baed6;
+      --action: #fb6a4a;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --selected: #e0f2fe;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 20px;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .main-stage { min-width: 0; }
+
+    .hero-card,
+    .network-card,
+    .side-panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card {
+      padding: 24px 26px;
+      margin-bottom: 18px;
+    }
+
+    .hero-eyebrow,
+    .panel-eyebrow {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    h1, h2, p { margin: 0; }
+
+    h1 {
+      font-size: 32px;
+      line-height: 1.1;
+      margin-bottom: 10px;
+    }
+
+    .hero-card p,
+    .panel-copy {
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .network-card { overflow: hidden; }
+
+    .network-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--border);
+      background: #fbfdff;
+    }
+
+    .toolbar-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .toolbar-subtitle {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .legend {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      display: inline-block;
+    }
+
+    .gene-dot { background: var(--gene); }
+    .action-dot { background: var(--action); }
+
+    #mynetwork {
+      width: 100%;
+      height: calc(100vh - 210px);
+      min-height: 620px;
+      background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
+    }
+
+    .side-panel {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      position: sticky;
+      top: 24px;
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+    }
+
+    .panel-section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .panel-section h2 {
+      font-size: 24px;
+      line-height: 1.15;
+    }
+
+    .panel-search {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .panel-search:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08);
+    }
+
+    .panel-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .primary-btn,
+    .secondary-btn {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+
+    .primary-btn {
+      background: var(--accent);
+      color: white;
+    }
+
+    .primary-btn:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.02);
+    }
+
+    .secondary-btn {
+      background: #eef4fb;
+      color: #1e293b;
+    }
+
+    .secondary-btn:hover {
+      background: #e3edf9;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+    }
+
+    .count-badge,
+    .muted-mini {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .count-badge {
+      background: #eff6ff;
+      color: #1d4ed8;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-weight: 700;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .stat-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      background: #fcfdff;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-size: 22px;
+      font-weight: 800;
+    }
+
+    .chips-wrap,
+    .mini-chip-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .empty-state {
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      color: var(--muted);
+      background: #fafcff;
+      font-size: 14px;
+    }
+
+    .mini-chip,
+    .selected-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: #eff6ff;
+      color: #1e3a8a;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .gene-list-section {
+      min-height: 220px;
+    }
+
+    .gene-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .gene-item {
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--border);
+      background: white;
+      color: var(--text);
+      padding: 11px 12px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+
+    .gene-item:hover {
+      border-color: #b6c8e0;
+      background: #fafcff;
+    }
+
+    .gene-item.selected {
+      background: var(--selected);
+      border-color: #93c5fd;
+      color: #0f3d91;
+    }
+
+    .info-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      background: #fcfdff;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 14px;
+    }
+
+    .info-title {
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .info-text {
+      color: #334155;
+      white-space: pre-wrap;
+      margin-bottom: 12px;
+    }
+
+    .info-subtitle {
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .loading,
+    .error-box {
+      margin-top: 12px;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 14px;
+    }
+
+    .loading {
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+
+    .error-box {
+      background: #fff1f2;
+      color: #be123c;
+      border: 1px solid #fecdd3;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .edge-link-row {
+      margin-top: 10px;
+    }
+
+    .edge-link-row a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .edge-link-row a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 1100px) {
+      .app-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .side-panel {
+        position: static;
+        max-height: none;
+      }
+
+      #mynetwork {
+        height: 680px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <main class="main-stage">
+      <div class="hero-card">
+        <div class="hero-eyebrow">Interactive oncology relationship map</div>
+        <h1>Gene–Actionable Network Explorer</h1>
+        <p>
+          This version reads actionable recommendations dynamically from
+          <strong>[OVC]Actionable_Recommendations.csv</strong>. Edge tooltips include the article title and
+          link, and clicking an edge opens a Google Scholar search for that article title.
+        </p>
+        <div id="statusBox" class="loading">Loading CSV and building network…</div>
+      </div>
+
+      <div class="network-card">
+        <div class="network-toolbar">
+          <div>
+            <div class="toolbar-title">Network view</div>
+            <div class="toolbar-subtitle" id="networkSummary">Preparing network…</div>
+          </div>
+          <div class="legend">
+            <span class="legend-item"><span class="legend-dot gene-dot"></span> Genes</span>
+            <span class="legend-item"><span class="legend-dot action-dot"></span> Actionables</span>
+          </div>
+        </div>
+        <div id="mynetwork"></div>
+      </div>
+    </main>
+
+    <aside class="side-panel">
+      <div class="panel-section">
+        <div class="panel-eyebrow">Interactive gene explorer</div>
+        <h2>Gene Selection Panel</h2>
+        <p class="panel-copy">
+          Pick genes from the list. The graph will keep only the selected genes and their connected actionable
+          recommendations.
+        </p>
+      </div>
+
+      <div class="panel-section">
+        <input id="geneSearch" class="panel-search" type="text" placeholder="Filter genes in the panel..." />
+        <div class="panel-actions">
+          <button id="selectVisibleBtn" class="secondary-btn">Select visible</button>
+          <button id="clearSelectionBtn" class="secondary-btn">Clear selection</button>
+          <button id="showAllBtn" class="primary-btn">Show full network</button>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-header">
+          <span>Selected genes</span>
+          <span id="selectedCountBadge" class="count-badge">0</span>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Total genes</div>
+            <div class="stat-value" id="totalGenesStat">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Selected</div>
+            <div class="stat-value" id="selectedGenesStat">0</div>
+          </div>
+        </div>
+        <div id="selectedGenesChips" class="chips-wrap empty-state">No genes selected</div>
+      </div>
+
+      <div class="panel-section gene-list-section">
+        <div class="section-header">
+          <span>Available genes</span>
+          <span id="shownGenesLabel" class="muted-mini">0 shown</span>
+        </div>
+        <div id="geneList" class="gene-list"></div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-header">
+          <span>Details</span>
+        </div>
+        <div id="actionableInfo" class="info-card">
+          Click an actionable node to inspect the recommendation. Click an edge to inspect the source article and open a Google Scholar search.
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const CSV_FILE = "[OVC]Actionable_Recommendations.csv";
+
+    let network = null;
+    let nodesDS = null;
+    let edgesDS = null;
+
+    let allNodes = [];
+    let edgeList = [];
+    let nodeMap = new Map();
+    let edgeMap = new Map();
+    let geneIds = [];
+    let selectedGenes = new Set();
+    let geneFilterText = "";
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function setStatus(message, isError = false) {
+      const box = document.getElementById("statusBox");
+      box.className = isError ? "error-box" : "loading";
+      box.textContent = message;
+    }
+
+    function splitGenes(raw) {
+      if (raw == null) return [];
+      return String(raw)
+        .split(/[;,|]/g)
+        .map(g => g.trim())
+        .filter(Boolean)
+        .map(g => g.replace(/\s+/g, " "))
+        .filter((g, idx, arr) => arr.indexOf(g) === idx);
+    }
+
+    function parseCsvLine(line) {
+      const out = [];
+      let cur = "";
+      let inQuotes = false;
+
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        const next = line[i + 1];
+
+        if (ch === '"') {
+          if (inQuotes && next === '"') {
+            cur += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === "," && !inQuotes) {
+          out.push(cur);
+          cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+
+      out.push(cur);
+      return out.map(v => v.trim());
+    }
+
+    function parseCsv(text) {
+      const lines = text
+        .replace(/^\uFEFF/, "")
+        .split(/\r?\n/)
+        .filter(line => line.trim().length > 0);
+
+      if (!lines.length) return [];
+
+      const headers = parseCsvLine(lines[0]);
+      const rows = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const values = parseCsvLine(lines[i]);
+        const row = {};
+        headers.forEach((header, idx) => {
+          row[header] = values[idx] ?? "";
+        });
+        rows.push(row);
+      }
+
+      return rows;
+    }
+
+    function buildEdgeTooltip(articleTitle, articleLink, publicationYear) {
+      const parts = [
+        "<div><strong>Source article</strong></div>",
+        `<div>${escapeHtml(articleTitle || "N/A")}</div>`
+      ];
+
+      if (publicationYear) {
+        parts.push(`<div><strong>Year:</strong> ${escapeHtml(publicationYear)}</div>`);
+      }
+
+      if (articleLink) {
+        parts.push(`<div><strong>Link:</strong> ${escapeHtml(articleLink)}</div>`);
+      }
+
+      parts.push("<div style='margin-top:6px;'><em>Click edge to open Google Scholar search</em></div>");
+      return parts.join("");
+    }
+
+    function buildGraphFromRows(rows) {
+      const geneNodeMap = new Map();
+      const actionableNodeMap = new Map();
+      const edges = [];
+      let actionIndex = 1;
+      let edgeIndex = 1;
+
+      rows.forEach((row) => {
+        const articleTitle = (row["Article Title"] || "").trim();
+        const publicationYear = (row["Publication Year"] || "").trim();
+        const recommendation = (row["Actionable Recommendation"] || "").trim();
+        const genes = splitGenes(row["Impacted Genes"]);
+        const articleLink = (row["Article Link"] || "").trim();
+
+        if (!recommendation) return;
+
+        const actionableId = `AR_${actionIndex++}`;
+
+        actionableNodeMap.set(actionableId, {
+          id: actionableId,
+          label: actionableId,
+          shape: "dot",
+          size: 18,
+          color: "#fb6a4a",
+          font: { color: "black" },
+          title: recommendation,
+          recommendation,
+          articleTitle,
+          publicationYear,
+          articleLink,
+          rawGenes: genes
+        });
+
+        genes.forEach((gene) => {
+          if (!geneNodeMap.has(gene)) {
+            geneNodeMap.set(gene, {
+              id: gene,
+              label: gene,
+              shape: "dot",
+              size: 22,
+              color: "#6baed6",
+              font: { color: "black" },
+              title: gene
+            });
+          }
+
+          const edgeId = `EDGE_${edgeIndex++}`;
+          const edge = {
+            id: edgeId,
+            from: gene,
+            to: actionableId,
+            title: buildEdgeTooltip(articleTitle, articleLink, publicationYear),
+            articleTitle,
+            articleLink,
+            publicationYear,
+            recommendation,
+            width: 1.5
+          };
+
+          edges.push(edge);
+        });
+      });
+
+      allNodes = [
+        ...Array.from(actionableNodeMap.values()),
+        ...Array.from(geneNodeMap.values())
+      ];
+
+      edgeList = edges;
+      nodeMap = new Map(allNodes.map(n => [String(n.id), n]));
+      edgeMap = new Map(edgeList.map(e => [String(e.id), e]));
+      geneIds = Array.from(geneNodeMap.keys()).sort((a, b) => a.localeCompare(b));
+    }
+
+    function buildVisibleGraph() {
+      if (!selectedGenes.size) {
+        return {
+          visibleNodes: allNodes,
+          visibleEdges: edgeList
+        };
+      }
+
+      const visibleActionableIds = new Set();
+      const visibleEdges = edgeList.filter(edge => {
+        const keep = selectedGenes.has(String(edge.from));
+        if (keep) visibleActionableIds.add(String(edge.to));
+        return keep;
+      });
+
+      const visibleNodeIds = new Set([
+        ...Array.from(selectedGenes),
+        ...Array.from(visibleActionableIds)
+      ]);
+
+      const visibleNodes = allNodes.filter(node => visibleNodeIds.has(String(node.id)));
+      return { visibleNodes, visibleEdges };
+    }
+
+    function updateSummary(visibleNodes, visibleEdges) {
+      const visibleGenes = visibleNodes.filter(n => !String(n.id).startsWith("AR_")).length;
+      const visibleActionables = visibleNodes.filter(n => String(n.id).startsWith("AR_")).length;
+
+      const summary = selectedGenes.size
+        ? `Showing ${selectedGenes.size} selected gene${selectedGenes.size > 1 ? "s" : ""}, ${visibleActionables} connected actionable item${visibleActionables !== 1 ? "s" : ""}, and ${visibleEdges.length} relationship${visibleEdges.length !== 1 ? "s" : ""}`
+        : `Showing full network with ${visibleGenes} genes, ${visibleActionables} actionable items, and ${visibleEdges.length} relationships`;
+
+      document.getElementById("networkSummary").textContent = summary;
+    }
+
+    function setDefaultInfo() {
+      document.getElementById("actionableInfo").innerHTML =
+        "Click an actionable node to inspect the recommendation. Click an edge to inspect the source article and open a Google Scholar search.";
+    }
+
+    function showActionableInfo(actionableId) {
+      const actionable = nodeMap.get(String(actionableId));
+      if (!actionable) return;
+
+      const visibleNodeIds = new Set(nodesDS.getIds().map(String));
+      const connectedGenes = edgeList
+        .filter(e => String(e.to) === String(actionableId))
+        .map(e => String(e.from))
+        .filter(id => visibleNodeIds.has(id))
+        .sort((a, b) => a.localeCompare(b));
+
+      const genesHtml = connectedGenes.length
+        ? connectedGenes.map(g => `<span class="mini-chip">${escapeHtml(g)}</span>`).join("")
+        : '<span class="muted">No visible genes are connected to this actionable in the current view.</span>';
+
+      const linkHtml = actionable.articleLink
+        ? `<div class="edge-link-row"><a href="${escapeHtml(actionable.articleLink)}" target="_blank" rel="noopener noreferrer">Open article link</a></div>`
+        : "";
+
+      document.getElementById("actionableInfo").innerHTML = `
+        <div class="info-title">${escapeHtml(actionable.label || actionable.id)}</div>
+        <div class="info-subtitle">Actionable recommendation</div>
+        <div class="info-text">${escapeHtml(actionable.recommendation || actionable.title || "")}</div>
+        <div class="info-subtitle">Source article</div>
+        <div class="info-text">${escapeHtml(actionable.articleTitle || "N/A")}</div>
+        <div class="info-subtitle">Publication year</div>
+        <div class="info-text">${escapeHtml(actionable.publicationYear || "N/A")}</div>
+        ${linkHtml}
+        <div class="info-subtitle" style="margin-top:12px;">Connected visible genes</div>
+        <div class="mini-chip-wrap">${genesHtml}</div>
+      `;
+    }
+
+    function openScholarSearch(articleTitle) {
+      if (!articleTitle) return;
+      const scholarUrl = `https://scholar.google.com/scholar?q=${encodeURIComponent(articleTitle)}`;
+      window.open(scholarUrl, "_blank", "noopener");
+    }
+
+    function showEdgeInfo(edgeId) {
+      const edge = edgeMap.get(String(edgeId));
+      if (!edge) return;
+
+      const scholarUrl = edge.articleTitle
+        ? `https://scholar.google.com/scholar?q=${encodeURIComponent(edge.articleTitle)}`
+        : "";
+
+      const linkHtml = edge.articleLink
+        ? `<div class="edge-link-row"><a href="${escapeHtml(edge.articleLink)}" target="_blank" rel="noopener noreferrer">Open CSV article link</a></div>`
+        : "";
+
+      const scholarHtml = scholarUrl
+        ? `<div class="edge-link-row"><a href="${escapeHtml(scholarUrl)}" target="_blank" rel="noopener noreferrer">Open Google Scholar search</a></div>`
+        : "";
+
+      document.getElementById("actionableInfo").innerHTML = `
+        <div class="info-title">Edge source</div>
+        <div class="info-subtitle">Article title</div>
+        <div class="info-text">${escapeHtml(edge.articleTitle || "N/A")}</div>
+        <div class="info-subtitle">Publication year</div>
+        <div class="info-text">${escapeHtml(edge.publicationYear || "N/A")}</div>
+        <div class="info-subtitle">Connected relationship</div>
+        <div class="info-text">${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</div>
+        ${linkHtml}
+        ${scholarHtml}
+      `;
+    }
+
+    function renderNetwork() {
+      const { visibleNodes, visibleEdges } = buildVisibleGraph();
+
+      nodesDS = new vis.DataSet(visibleNodes);
+      edgesDS = new vis.DataSet(visibleEdges);
+
+      const container = document.getElementById("mynetwork");
+      const data = { nodes: nodesDS, edges: edgesDS };
+      const options = {
+        autoResize: true,
+        interaction: {
+          hover: true,
+          tooltipDelay: 120,
+          multiselect: false,
+          navigationButtons: true
+        },
+        physics: {
+          enabled: true,
+          stabilization: { iterations: 200, fit: true },
+          barnesHut: {
+            gravitationalConstant: -7000,
+            centralGravity: 0.18,
+            springLength: 160,
+            springConstant: 0.035,
+            damping: 0.18,
+            avoidOverlap: 0.25
+          }
+        },
+        edges: {
+          selectionWidth: 3,
+          hoverWidth: 2.2,
+          smooth: { enabled: true, type: "dynamic" },
+          font: {
+            size: 12,
+            align: "middle"
+          }
+        },
+        nodes: {
+          font: {
+            face: "Inter, system-ui, sans-serif",
+            size: 15
+          }
+        }
+      };
+
+      if (network) {
+        network.destroy();
+      }
+
+      network = new vis.Network(container, data, options);
+
+      network.once("stabilizationIterationsDone", function() {
+        network.fit({ animation: { duration: 450, easingFunction: "easeInOutQuad" } });
+      });
+
+      network.on("click", function(params) {
+        if (params.edges && params.edges.length) {
+          const edgeId = String(params.edges[0]);
+          const edge = edgeMap.get(edgeId);
+          showEdgeInfo(edgeId);
+          if (edge && edge.articleTitle) {
+            openScholarSearch(edge.articleTitle);
+          }
+          return;
+        }
+
+        if (params.nodes && params.nodes.length) {
+          const nodeId = String(params.nodes[0]);
+          if (nodeId.startsWith("AR_")) {
+            showActionableInfo(nodeId);
+          } else {
+            setDefaultInfo();
+          }
+          return;
+        }
+
+        setDefaultInfo();
+      });
+
+      updateSummary(visibleNodes, visibleEdges);
+    }
+
+    function updateSelectedGenesUI() {
+      const chipsEl = document.getElementById("selectedGenesChips");
+      const selected = Array.from(selectedGenes).sort((a, b) => a.localeCompare(b));
+
+      document.getElementById("selectedGenesStat").textContent = selected.length;
+      document.getElementById("selectedCountBadge").textContent = selected.length;
+
+      if (!selected.length) {
+        chipsEl.className = "chips-wrap empty-state";
+        chipsEl.textContent = "No genes selected";
+        return;
+      }
+
+      chipsEl.className = "chips-wrap";
+      chipsEl.innerHTML = selected
+        .map(g => `<span class="selected-chip">${escapeHtml(g)}</span>`)
+        .join("");
+    }
+
+    function renderGenePanel() {
+      const listEl = document.getElementById("geneList");
+      const term = geneFilterText.trim().toLowerCase();
+      const visibleGenes = geneIds.filter(g => g.toLowerCase().includes(term));
+
+      listEl.innerHTML = "";
+
+      if (!visibleGenes.length) {
+        listEl.innerHTML = `<div class="empty-state">No genes match the current filter.</div>`;
+      } else {
+        visibleGenes.forEach(gene => {
+          const item = document.createElement("button");
+          item.className = "gene-item" + (selectedGenes.has(gene) ? " selected" : "");
+          item.type = "button";
+          item.textContent = gene;
+          item.dataset.gene = gene;
+          item.addEventListener("click", () => {
+            if (selectedGenes.has(gene)) {
+              selectedGenes.delete(gene);
+            } else {
+              selectedGenes.add(gene);
+            }
+            renderGenePanel();
+            updateSelectedGenesUI();
+            renderNetwork();
+          });
+          listEl.appendChild(item);
+        });
+      }
+
+      document.getElementById("shownGenesLabel").textContent = `${visibleGenes.length} shown`;
+      document.getElementById("totalGenesStat").textContent = geneIds.length;
+    }
+
+    function attachUIHandlers() {
+      document.getElementById("geneSearch").addEventListener("input", (e) => {
+        geneFilterText = e.target.value || "";
+        renderGenePanel();
+      });
+
+      document.getElementById("selectVisibleBtn").addEventListener("click", () => {
+        const term = geneFilterText.trim().toLowerCase();
+        const visibleGenes = geneIds.filter(g => g.toLowerCase().includes(term));
+        visibleGenes.forEach(g => selectedGenes.add(g));
+        renderGenePanel();
+        updateSelectedGenesUI();
+        renderNetwork();
+      });
+
+      document.getElementById("clearSelectionBtn").addEventListener("click", () => {
+        selectedGenes.clear();
+        renderGenePanel();
+        updateSelectedGenesUI();
+        renderNetwork();
+        setDefaultInfo();
+      });
+
+      document.getElementById("showAllBtn").addEventListener("click", () => {
+        selectedGenes.clear();
+        geneFilterText = "";
+        document.getElementById("geneSearch").value = "";
+        renderGenePanel();
+        updateSelectedGenesUI();
+        renderNetwork();
+        setDefaultInfo();
+      });
+    }
+
+    async function loadCsvAndInitialize() {
+      try {
+        setStatus(`Loading ${CSV_FILE}…`);
+        const response = await fetch(CSV_FILE, { cache: "no-store" });
+
+        if (!response.ok) {
+          throw new Error(`Unable to load CSV (${response.status} ${response.statusText})`);
+        }
+
+        const csvText = await response.text();
+        const rows = parseCsv(csvText);
+
+        if (!rows.length) {
+          throw new Error("CSV loaded, but no data rows were found.");
+        }
+
+        const requiredColumns = [
+          "Article Title",
+          "Publication Year",
+          "Actionable Recommendation",
+          "Impacted Genes",
+          "Article Link"
+        ];
+
+        const missing = requiredColumns.filter(col => !(col in rows[0]));
+        if (missing.length) {
+          throw new Error(`Missing required column(s): ${missing.join(", ")}`);
+        }
+
+        buildGraphFromRows(rows);
+        attachUIHandlers();
+        renderGenePanel();
+        updateSelectedGenesUI();
+        renderNetwork();
+        setDefaultInfo();
+
+        const actionableCount = allNodes.filter(n => String(n.id).startsWith("AR_")).length;
+        setStatus(
+          `Loaded ${rows.length} recommendation row(s), ${geneIds.length} unique gene(s), and ${actionableCount} actionable item(s).`
+        );
+      } catch (err) {
+        console.error(err);
+        setStatus(
+          `Failed to load ${CSV_FILE}. ${err.message}. If you opened this HTML directly, try running it through a local web server instead of file://.`,
+          true
+        );
+        document.getElementById("networkSummary").textContent = "Unable to build network";
+      }
+    }
+
+    loadCsvAndInitialize();
+  </script>
+</body>
+</html>
