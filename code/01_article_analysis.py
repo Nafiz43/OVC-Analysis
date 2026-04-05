@@ -35,19 +35,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from collections import Counter, defaultdict
 
+from tqdm import tqdm
+
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-DEFAULT_MD_DIR = Path("/Users/nafiz43/Documents/GitHub/OVC-Analysis/code/data/actionable-articles-preprocessed")
-DEFAULT_OUTPUT_DIR = Path("/Users/nafiz43/Documents/GitHub/OVC-Analysis/code/data/results")
+DEFAULT_MD_DIR = Path("/data/Deep_Angiography/OVC-Analysis/code/data/actionable-articles-preprocessed")
+DEFAULT_OUTPUT_DIR = Path("/data/Deep_Angiography/OVC-Analysis/code/data/results")
 DEFAULT_OUTPUT_CSV = DEFAULT_OUTPUT_DIR / "actionable_findings_extracted.csv"
 DEFAULT_PROGRESS_LOG = DEFAULT_OUTPUT_DIR / "actionable_findings_progress.log"
 DEFAULT_NO_FINDINGS_LOG = DEFAULT_OUTPUT_DIR / "articles_with_no_actionables.csv"
 DEFAULT_STATS_FILE = DEFAULT_OUTPUT_DIR / "actionable_extraction_stats.txt"
 
-DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_MODEL = "qwen2.5:72b"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_SLEEP_BETWEEN_FILES = 0.5
 DEFAULT_MAX_CHARS_PER_ARTICLE = 120000
@@ -125,20 +127,16 @@ def build_extraction_prompt(article_text: str, article_title_guess: str, article
     )
 
     return f"""
-You are an expert biomedical literature extraction assistant.
+You are an expert biomedical literature extraction assistant specializing in ovarian cancer clinical and translational research.
 
-Your task is to read a markdown-formatted scientific article and extract clinically or biologically meaningful findings in a structured way.
+Your task: read a markdown-formatted scientific article and extract every clinically or biologically meaningful finding as structured JSON rows.
 
-The domain is ovarian cancer biomarker and therapy literature. Focus especially on:
-1. chemotherapy response and platinum resistance
-2. survival and prognostic outcome
-3. molecular subtype, targetability, HRD/PARP-related or tumor microenvironment-related findings
+═══════════════════════════════════════════════
+OUTPUT FORMAT — MANDATORY
+═══════════════════════════════════════════════
 
-Return ONLY a valid JSON array.
-Do NOT return markdown fences.
-Do NOT return any explanatory text before or after the JSON.
+Return ONLY a valid JSON array. No markdown fences. No preamble. No postamble.
 
-Required JSON schema:
 [
   {{
     "Actionable/Findings": "...",
@@ -150,59 +148,111 @@ Required JSON schema:
   }}
 ]
 
+If the article contains no relevant findings, return exactly: []
+
+═══════════════════════════════════════════════
+EXTRACTION SCOPE — WHERE TO LOOK
+═══════════════════════════════════════════════
+
+Priority order for finding evidence:
+1. Results section — quantitative outcomes, statistical comparisons, survival curves
+2. Conclusions / Discussion conclusions — interpretive findings backed by data
+3. Abstract results — only if the full Results section is absent or truncated
+4. Methods — ONLY if a novel methodological design directly yields a finding (rare)
+
+IGNORE:
+- Introduction / Background statements that describe prior literature, not this study's data
+- Generic methodological descriptions with no tied result
+- Limitations sections unless a limitation directly invalidates a finding
+- Boilerplate clinical trial registration or ethics statements
+
+═══════════════════════════════════════════════
 FIELD DEFINITIONS
+═══════════════════════════════════════════════
 
 1. Actionable/Findings
-- A concise, meaningful finding or actionable conclusion grounded in the article.
-- Prefer findings involving genes, biomarkers, pathways, prognosis, resistance, survival, or therapy response.
-- Keep it specific and useful.
+   - ONE specific, self-contained, clinically or biologically meaningful finding per row.
+   - Must include: the entity (gene, biomarker, drug, pathway, subgroup), the direction of effect,
+     and the clinical/biological context.
+   - Good: "High BRCA2 mutation rate was associated with improved PFS in platinum-sensitive patients (HR 0.54, p=0.003)"
+   - Bad: "BRCA mutations were discussed in relation to treatment"
+   - If a finding is relevant to more than one Dictionary Group, emit one row per group
+     (same finding text, different Dictionary Group and Phrases from the dictionary).
 
-2. Evidence
-- This field is mandatory and must be detailed.
-- Include:
-  a) the exact statement(s) from the article that support the finding, quoted as faithfully as possible from the markdown
-  b) a concise explanation of how those exact statement(s) support the actionable/finding
-- Format exactly like this:
-  "Exact statement(s): ... | Inference: ..."
+2. Evidence  ← THIS FIELD IS THE MOST IMPORTANT
+   Format exactly:
+     "Exact statement(s): <verbatim quote(s) from the article, minimum 20 words each> | Inference: <1-2 sentences explaining how the quote supports the finding>"
+
+   Rules:
+   - The verbatim quote MUST be copied character-for-character from the article text.
+   - Include numbers, p-values, confidence intervals, and effect sizes whenever present.
+   - If multiple non-contiguous sentences jointly support the finding, join them with " [...] ".
+   - The Inference must explain causality or clinical significance, not just paraphrase.
 
 3. Article Title
-- Use the actual article title if present in the markdown.
-- Otherwise use: "{article_title_guess}"
+   - Use the actual article title if present in the markdown.
+   - Otherwise use: "{article_title_guess}"
 
 4. Article Year
-- Use the actual year if present in the markdown.
-- Otherwise use: "{article_year_guess}"
-- If unknown, use an empty string.
+   - Use the actual year if present in the markdown.
+   - Otherwise use: "{article_year_guess}"
+   - If unknown, use an empty string.
 
 5. Dictionary Group
-- Must be exactly one of:
-  - "Dictionary A: Chemotherapy & Resistance Findings"
-  - "Dictionary B: Survival & Clinical Outcome Findings"
-  - "Dictionary C: Molecular Subtypes & Therapy Findings"
+   - Must be EXACTLY one of:
+     * "Dictionary A: Chemotherapy & Resistance Findings"
+     * "Dictionary B: Survival & Clinical Outcome Findings"
+     * "Dictionary C: Molecular Subtypes & Therapy Findings"
+   - Choose the group whose dictionary terms appear most directly in the evidence.
 
 6. Phrases from the dictionary
-- Must be a JSON array.
-- Include only exact phrases from the dictionaries below.
-- Include only phrases actually relevant to the finding/evidence.
+   - JSON array of exact phrases copied verbatim from the dictionary lists below.
+   - Include ONLY phrases that appear in or are directly implied by the Evidence quote.
+   - At least one phrase is required; omit the row entirely if none apply.
 
-STRICT RULES
+═══════════════════════════════════════════════
+QUALITY RULES
+═══════════════════════════════════════════════
 
-- Only extract findings that are directly supported by the article text.
-- No hallucinations.
-- No unsupported gene claims.
-- No duplicate rows that say the same thing in different wording.
-- Prefer results over background/introduction material.
-- Ignore generic methodological descriptions unless they directly support a clinically meaningful result.
-- If there is not enough evidence for a finding, do not include it.
-- If the article contains no relevant findings, return [].
-- Choose the single best Dictionary Group per finding.
-- Prefer precision over recall, but do not ignore clearly relevant findings.
+✓ DO
+  - Emit separate rows for statistically distinct subgroup findings (e.g., platinum-sensitive vs. platinum-resistant)
+  - Emit separate rows for each distinct biomarker even if reported in the same table
+  - Include hazard ratios, ORs, p-values, confidence intervals verbatim in Evidence
+  - Prefer multivariate/independent findings over univariate ones where both are reported
 
+✗ DO NOT
+  - Hallucinate gene names, drug names, or statistics not present in the article
+  - Emit duplicate rows (same finding + same article + same group)
+  - Emit near-duplicate rows that only differ in minor wording — pick the most precise one
+  - Emit rows where Phrases from the dictionary is an empty array
+  - Attribute findings from cited prior studies to this article
+
+═══════════════════════════════════════════════
+NEGATIVE EXAMPLES — DO NOT EXTRACT ROWS LIKE THESE
+═══════════════════════════════════════════════
+
+✗ Too vague:
+  {{"Actionable/Findings": "Platinum resistance was studied.", "Evidence": "Exact statement(s): Platinum resistance is a major clinical challenge. | Inference: The article discusses platinum resistance.", ...}}
+
+✗ From background, not results:
+  {{"Actionable/Findings": "PARP inhibitors have shown efficacy in BRCA-mutated cancers.", "Evidence": "Exact statement(s): Several studies have demonstrated the efficacy of PARP inhibitors... | Inference: This establishes the rationale.", ...}}
+
+✗ No statistics when statistics are available:
+  {{"Actionable/Findings": "High HRD score was associated with better PFS.", "Evidence": "Exact statement(s): Patients with high HRD scores did better. | Inference: HRD predicts PFS.", ...}}
+  ← Should have included the actual HR and p-value from the Results section.
+
+✗ Unverifiable phrase match:
+  {{"Phrases from the dictionary": ["complete response"]}}  ← "complete response" is not in any dictionary
+
+═══════════════════════════════════════════════
 DICTIONARY GROUPS
+═══════════════════════════════════════════════
 
 {dictionary_text}
 
+═══════════════════════════════════════════════
 ARTICLE MARKDOWN
+═══════════════════════════════════════════════
 
 {article_text}
 """.strip()
@@ -517,7 +567,7 @@ def call_ollama_cli(
 
         except Exception as e:
             last_err = e
-            print(f"[WARN] Ollama attempt {attempt}/{max_retries} failed: {e}")
+            tqdm.write(f"[WARN] Ollama attempt {attempt}/{max_retries} failed: {e}")
             time.sleep(2 * attempt)
 
     raise RuntimeError(f"Ollama extraction failed after {max_retries} attempts: {last_err}")
@@ -561,7 +611,7 @@ def process_single_markdown(
         }
 
     if len(text) > max_chars_per_article:
-        print(f"[WARN] {md_path.name} is long ({len(text)} chars). Truncating to {max_chars_per_article} chars.")
+        tqdm.write(f"[WARN] {md_path.name} is long ({len(text)} chars). Truncating to {max_chars_per_article} chars.")
         text = text[:max_chars_per_article]
 
     title_guess, year_guess = guess_title_and_year_from_markdown(text, md_path.stem)
@@ -824,13 +874,22 @@ def main():
     print(f"[INFO] No-findings log: {args.no_findings_log}")
     print(f"[INFO] Stats file: {args.stats_file}")
 
-    for idx, md_path in enumerate(md_files, start=1):
+    pbar = tqdm(
+        md_files,
+        total=len(md_files),
+        desc="Extracting",
+        unit="article",
+        dynamic_ncols=True,
+        colour="cyan",
+    )
+
+    for md_path in pbar:
         if args.resume and md_path.name in completed:
             skipped_count += 1
-            print(f"[SKIP] [{idx}/{len(md_files)}] {md_path.name}")
+            pbar.set_postfix_str(f"SKIP | rows={total_rows} err={error_count}", refresh=True)
             continue
 
-        print(f"[INFO] [{idx}/{len(md_files)}] Processing {md_path.name}")
+        pbar.set_description(f"Extracting · {md_path.stem[:40]}")
 
         try:
             result = process_single_markdown(
@@ -852,11 +911,15 @@ def main():
 
             if result["status"] == "with_findings":
                 parse_mode = result.get("parse_mode", "unknown")
-                print(f"[DONE] {md_path.name} -> {result['rows_written']} row(s) | parse_mode={parse_mode}")
+                tqdm.write(
+                    f"[DONE] {md_path.name} → {result['rows_written']} row(s) | parse_mode={parse_mode}"
+                )
             else:
                 reason = result.get("reason", "")
                 parse_mode = result.get("parse_mode", "unknown")
-                print(f"[NO_FINDINGS] {md_path.name} -> logged separately | reason={reason} | parse_mode={parse_mode}")
+                tqdm.write(
+                    f"[NO_FINDINGS] {md_path.name} → {reason} | parse_mode={parse_mode}"
+                )
 
         except Exception as e:
             error_count += 1
@@ -872,9 +935,12 @@ def main():
                 "validation_status": "error",
             }
             all_results.append(err_result)
-            print(f"[ERROR] {md_path.name}: {e}")
+            tqdm.write(f"[ERROR] {md_path.name}: {e}")
 
+        pbar.set_postfix(rows=total_rows, skipped=skipped_count, errors=error_count, refresh=True)
         time.sleep(args.sleep)
+
+    pbar.close()
 
     stats_text = compute_stats(all_results)
     write_stats_file(args.stats_file, stats_text)
