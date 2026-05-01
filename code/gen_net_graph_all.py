@@ -1,21 +1,70 @@
 #!/usr/bin/env python3
 """
-gen_net_graph_all.py
+gen_net_graph_all.py  (v7)
 
-Build an interactive bipartite network graph from:
-    /data/Deep_Angiography/OVC-Analysis/code/data/results/actionable_findings_extracted.csv
+What changed from v6
+────────────────────
+  • tqdm progress bars on every slow step (CSV read, graph build, embed, write)
+  • ProcessPoolExecutor for embedding — each worker loads its own model copy,
+    corpus is split across workers; falls back to single-process if needed
+  • Physics restored: vis-network Barnes-Hut runs once in browser on first load,
+    stabilisation fires a progress overlay, then freezes. Nodes have no baked x/y.
+  • Search fires ONLY on Enter key or Search button click — never on every keystroke
+  • Embeddings baked directly into the single HTML file as BAKED_EMBEDDINGS JSON;
+    no external files, no localStorage, no CDN embedding download needed at runtime
+  • Transformers.js still loaded for query embedding only (~2–3 s, browser-cached)
+
+Usage
+─────
+    pip install sentence-transformers tqdm networkx numpy
+    python gen_net_graph_all.py
+    python gen_net_graph_all.py --skip-embed   # keyword-only, much faster
+    python gen_net_graph_all.py --workers 4    # parallel embedding workers
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import concurrent.futures
 import csv
-import html
 import json
+import math
+import os
 from collections import OrderedDict, defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    class tqdm:  # minimal shim so code runs without tqdm
+        def __init__(self, iterable=None, **kw):
+            self._it = iterable
+        def __iter__(self): return iter(self._it)
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def update(self, n=1): pass
+        def set_description(self, s): pass
+        @staticmethod
+        def write(s): print(s)
+
+try:
+    import numpy as np
+    HAS_NP = True
+except ImportError:
+    HAS_NP = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+    HAS_ST = True
+except ImportError:
+    HAS_ST = False
+
+
+# ── defaults ───────────────────────────────────────────────────────────────────
 
 DEFAULT_INPUT_CSV = Path(
     "/data/Deep_Angiography/OVC-Analysis/code/data/results/actionable_findings_extracted.csv"
@@ -25,14 +74,12 @@ DEFAULT_OUTPUT_HTML = Path(
 )
 
 REQUIRED_COLUMNS = [
-    "Actionable",
-    "Evidence",
-    "Article Title",
-    "Article Year",
-    "Dictionary Group",
-    "Phrases from the dictionary",
+    "Actionable", "Evidence", "Article Title",
+    "Article Year", "Dictionary Group", "Phrases from the dictionary",
 ]
 
+
+# ── text helpers ───────────────────────────────────────────────────────────────
 
 def normalize_text(value: str) -> str:
     return " ".join((value or "").strip().split())
@@ -41,1291 +88,1264 @@ def normalize_text(value: str) -> str:
 def split_semicolon_pipe(value: str) -> List[str]:
     if not value:
         return []
-
-    raw_parts = []
-    current = []
+    parts, cur = [], []
     for ch in value:
-        if ch in [";", "|"]:
-            raw_parts.append("".join(current))
-            current = []
+        if ch in (";", "|"):
+            parts.append("".join(cur)); cur = []
         else:
-            current.append(ch)
-    raw_parts.append("".join(current))
-
-    out = []
-    for part in raw_parts:
-        cleaned = normalize_text(part)
-        if cleaned:
-            out.append(cleaned)
-
-    deduped = []
-    seen = set()
-    for item in out:
-        if item not in seen:
-            deduped.append(item)
-            seen.add(item)
-    return deduped
+            cur.append(ch)
+    parts.append("".join(cur))
+    seen, out = set(), []
+    for p in parts:
+        c = normalize_text(p)
+        if c and c not in seen:
+            out.append(c); seen.add(c)
+    return out
 
 
-def build_plain_tooltip_text(text: str) -> str:
-    return normalize_text(text or "N/A")
-
+# ── CSV reader ─────────────────────────────────────────────────────────────────
 
 def read_csv_rows(csv_path: Path) -> List[Dict[str, str]]:
     if not csv_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {csv_path}")
+
+    # First pass: count rows for tqdm total
+    with csv_path.open("r", encoding="utf-8-sig") as f:
+        total = sum(1 for _ in f) - 1  # subtract header
 
     rows: List[Dict[str, str]] = []
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise ValueError("CSV appears empty or has no header row.")
-
-        missing = [col for col in REQUIRED_COLUMNS if col not in reader.fieldnames]
+        missing = [c for c in REQUIRED_COLUMNS if c not in reader.fieldnames]
         if missing:
             raise ValueError("Missing required column(s): " + ", ".join(missing))
 
-        for row in reader:
-            cleaned = {k: normalize_text(v or "") for k, v in row.items()}
-            if not cleaned["Actionable"] or not cleaned["Dictionary Group"]:
-                continue
-            rows.append(cleaned)
+        with tqdm(reader, total=total, desc="  Reading CSV", unit="row") as bar:
+            for row in bar:
+                cleaned = {k: normalize_text(v or "") for k, v in row.items()}
+                if not cleaned["Actionable"] or not cleaned["Dictionary Group"]:
+                    continue
+                rows.append(cleaned)
 
     if not rows:
         raise ValueError("No usable rows found in CSV.")
     return rows
 
 
-def build_graph_payload(rows: List[Dict[str, str]]) -> Tuple[List[dict], List[dict], dict]:
-    actionable_key_to_visid: OrderedDict[Tuple[str, str, str, str], str] = OrderedDict()
-    actionable_key_to_meta: Dict[Tuple[str, str, str, str], dict] = {}
+# ── graph payload builder ──────────────────────────────────────────────────────
 
-    dict_group_to_visid: OrderedDict[str, str] = OrderedDict()
+def build_graph_payload(
+    rows: List[Dict[str, str]],
+) -> Tuple[List[dict], List[dict], dict, List[str], List[str]]:
+
+    actionable_key_to_id: OrderedDict = OrderedDict()
+    actionable_key_to_meta: Dict = {}
+    dict_group_to_id: OrderedDict = OrderedDict()
     dict_group_to_phrases: Dict[str, List[str]] = defaultdict(list)
-
-    edges_seen = set()
+    edges_seen: set = set()
     edges: List[dict] = []
 
-    for row in rows:
-        actionable_key = (
-            row["Actionable"],
-            row["Evidence"],
-            row["Article Title"],
-            row["Article Year"],
-        )
-        dict_group = row["Dictionary Group"]
+    with tqdm(rows, desc="  Building nodes/edges", unit="row") as bar:
+        for row in bar:
+            ak = (row["Actionable"], row["Evidence"],
+                  row["Article Title"], row["Article Year"])
+            dg = row["Dictionary Group"]
 
-        if actionable_key not in actionable_key_to_visid:
-            visid = f"A_{len(actionable_key_to_visid) + 1}"
-            actionable_key_to_visid[actionable_key] = visid
-            actionable_key_to_meta[actionable_key] = {
+            if ak not in actionable_key_to_id:
+                visid = f"A_{len(actionable_key_to_id) + 1}"
+                actionable_key_to_id[ak] = visid
+                actionable_key_to_meta[ak] = {
+                    "id": visid,
+                    "short_label": f"a{len(actionable_key_to_id)}",
+                    "node_type": "actionable",
+                    "actionable":    row["Actionable"],
+                    "evidence":      row["Evidence"],
+                    "article_title": row["Article Title"],
+                    "article_year":  row["Article Year"],
+                }
+
+            if dg not in dict_group_to_id:
+                dict_group_to_id[dg] = f"D_{len(dict_group_to_id) + 1}"
+
+            if row["Phrases from the dictionary"]:
+                dict_group_to_phrases[dg].append(row["Phrases from the dictionary"])
+
+    # dict group meta
+    dict_group_meta: Dict[str, dict] = {}
+    with tqdm(dict_group_to_id.items(), desc="  Building groups",
+              unit="group", total=len(dict_group_to_id)) as bar:
+        for dg, visid in bar:
+            collected, seen = [], set()
+            for blob in dict_group_to_phrases.get(dg, []):
+                for item in (split_semicolon_pipe(blob)
+                             or ([normalize_text(blob)] if normalize_text(blob) else [])):
+                    if item not in seen:
+                        collected.append(item); seen.add(item)
+            dict_group_meta[dg] = {
                 "id": visid,
-                "short_label": f"a{len(actionable_key_to_visid)}",
-                "node_type": "actionable",
-                "actionable": row["Actionable"],
-                "evidence": row["Evidence"],
-                "article_title": row["Article Title"],
-                "article_year": row["Article Year"],
+                "short_label": f"d{len(dict_group_meta) + 1}",
+                "node_type": "dictionary_group",
+                "dictionary_group": dg,
+                "phrases_from_dictionary": collected,
             }
 
-        if dict_group not in dict_group_to_visid:
-            visid = f"D_{len(dict_group_to_visid) + 1}"
-            dict_group_to_visid[dict_group] = visid
-
-        phrases_val = row["Phrases from the dictionary"]
-        if phrases_val:
-            dict_group_to_phrases[dict_group].append(phrases_val)
-
-    dict_group_meta = {}
-    for dict_group, visid in dict_group_to_visid.items():
-        collected = []
-        seen = set()
-
-        for phrase_blob in dict_group_to_phrases.get(dict_group, []):
-            items = split_semicolon_pipe(phrase_blob)
-            if not items:
-                fallback = normalize_text(phrase_blob)
-                items = [fallback] if fallback else []
-
-            for item in items:
-                if item not in seen:
-                    collected.append(item)
-                    seen.add(item)
-
-        dict_group_meta[dict_group] = {
-            "id": visid,
-            "short_label": f"d{len(dict_group_meta) + 1}",
-            "node_type": "dictionary_group",
-            "dictionary_group": dict_group,
-            "phrases_from_dictionary": collected,
-        }
-
+    # edges
     edge_counter = 1
-    for row in rows:
-        actionable_key = (
-            row["Actionable"],
-            row["Evidence"],
-            row["Article Title"],
-            row["Article Year"],
-        )
-        dict_group = row["Dictionary Group"]
+    with tqdm(rows, desc="  Building edges", unit="row") as bar:
+        for row in bar:
+            ak = (row["Actionable"], row["Evidence"],
+                  row["Article Title"], row["Article Year"])
+            dg = row["Dictionary Group"]
+            fid = dict_group_to_id[dg]
+            tid = actionable_key_to_id[ak]
+            ek = (fid, tid)
+            if ek in edges_seen:
+                continue
+            edges_seen.add(ek)
+            edges.append({"id": f"E_{edge_counter}", "from": fid, "to": tid, "width": 1.6})
+            edge_counter += 1
 
-        from_id = dict_group_to_visid[dict_group]
-        to_id = actionable_key_to_visid[actionable_key]
-        edge_key = (from_id, to_id)
+    # collect texts for embedding
+    all_ids_ordered:   List[str] = []
+    all_texts_ordered: List[str] = []
+    nodes: List[dict] = []
 
-        if edge_key in edges_seen:
-            continue
-        edges_seen.add(edge_key)
-
-        edges.append(
-            {
-                "id": f"E_{edge_counter}",
-                "from": from_id,
-                "to": to_id,
-                "width": 1.6,
-            }
-        )
-        edge_counter += 1
-
-    nodes = []
-
-    for actionable_key, visid in actionable_key_to_visid.items():
-        meta = actionable_key_to_meta[actionable_key]
-
-        tooltip_text = build_plain_tooltip_text(meta["actionable"])
-
-        search_blob = " ".join(
-            [
-                meta["short_label"],
-                meta["actionable"],
-                meta["evidence"],
-                meta["article_title"],
-                meta["article_year"],
-            ]
-        ).lower()
-
-        nodes.append(
-            {
-                "id": meta["id"],
+    with tqdm(actionable_key_to_id.items(), desc="  Serialising actionables",
+              unit="node", total=len(actionable_key_to_id)) as bar:
+        for ak, visid in bar:
+            meta = actionable_key_to_meta[ak]
+            semantic_text = " ".join(filter(None, [
+                meta["actionable"], meta["evidence"], meta["article_title"],
+            ]))
+            search_blob = " ".join([
+                meta["short_label"], meta["actionable"], meta["evidence"],
+                meta["article_title"], meta["article_year"],
+            ]).lower()
+            all_ids_ordered.append(visid)
+            all_texts_ordered.append(semantic_text)
+            nodes.append({
+                "id": visid,
                 "label": meta["short_label"],
-                "shape": "dot",
-                "size": 18,
+                "shape": "dot", "size": 16,
                 "color": {
-                    "background": "#fb6a4a",
-                    "border": "#c2410c",
-                    "highlight": {"background": "#fb6a4a", "border": "#9a3412"},
-                    "hover": {"background": "#fb6a4a", "border": "#9a3412"},
+                    "background": "#fb6a4a", "border": "#c2410c",
+                    "highlight": {"background": "#fb923c", "border": "#9a3412"},
+                    "hover":     {"background": "#fb923c", "border": "#9a3412"},
                 },
                 "borderWidth": 1.5,
-                "font": {"color": "black"},
-                "title": tooltip_text,
-                "node_type": meta["node_type"],
-                "actionable": meta["actionable"],
-                "evidence": meta["evidence"],
+                "font": {"color": "#1e293b", "size": 13, "face": "IBM Plex Sans, sans-serif"},
+                "shadow": True,
+                "node_type": "actionable",
+                "actionable":    meta["actionable"],
+                "evidence":      meta["evidence"],
                 "article_title": meta["article_title"],
-                "article_year": meta["article_year"],
-                "search_blob": search_blob,
-            }
-        )
+                "article_year":  meta["article_year"],
+                "semantic_text": semantic_text,
+                "search_blob":   search_blob,
+            })
 
-    for dict_group, visid in dict_group_to_visid.items():
-        meta = dict_group_meta[dict_group]
-        phrases_preview = "; ".join(meta["phrases_from_dictionary"]) if meta["phrases_from_dictionary"] else "N/A"
-
-        tooltip_text = build_plain_tooltip_text(meta["dictionary_group"])
-
-        search_blob = " ".join(
-            [meta["short_label"], meta["dictionary_group"], phrases_preview]
-        ).lower()
-
-        nodes.append(
-            {
-                "id": meta["id"],
+    with tqdm(dict_group_to_id.items(), desc="  Serialising groups",
+              unit="node", total=len(dict_group_to_id)) as bar:
+        for dg, visid in bar:
+            meta = dict_group_meta[dg]
+            phrases_str = "; ".join(meta["phrases_from_dictionary"]) if meta["phrases_from_dictionary"] else ""
+            semantic_text = " ".join(filter(None, [dg, phrases_str]))
+            search_blob = " ".join([meta["short_label"], dg, phrases_str]).lower()
+            all_ids_ordered.append(visid)
+            all_texts_ordered.append(semantic_text)
+            nodes.append({
+                "id": visid,
                 "label": meta["short_label"],
-                "shape": "dot",
-                "size": 22,
+                "shape": "dot", "size": 22,
                 "color": {
-                    "background": "#6baed6",
-                    "border": "#2563eb",
-                    "highlight": {"background": "#6baed6", "border": "#1d4ed8"},
-                    "hover": {"background": "#6baed6", "border": "#1d4ed8"},
+                    "background": "#6baed6", "border": "#2563eb",
+                    "highlight": {"background": "#93c5fd", "border": "#1d4ed8"},
+                    "hover":     {"background": "#93c5fd", "border": "#1d4ed8"},
                 },
                 "borderWidth": 1.5,
-                "font": {"color": "black"},
-                "title": tooltip_text,
-                "node_type": meta["node_type"],
-                "dictionary_group": meta["dictionary_group"],
+                "font": {"color": "#1e293b", "size": 13, "face": "IBM Plex Sans, sans-serif"},
+                "shadow": True,
+                "node_type": "dictionary_group",
+                "dictionary_group": dg,
                 "phrases_from_dictionary": meta["phrases_from_dictionary"],
-                "search_blob": search_blob,
-            }
-        )
+                "semantic_text": semantic_text,
+                "search_blob":   search_blob,
+            })
 
     stats = {
-        "row_count": len(rows),
-        "actionable_count": len(actionable_key_to_visid),
-        "dictionary_group_count": len(dict_group_to_visid),
-        "edge_count": len(edges),
+        "row_count":              len(rows),
+        "actionable_count":       len(actionable_key_to_id),
+        "dictionary_group_count": len(dict_group_to_id),
+        "edge_count":             len(edges),
     }
+    return nodes, edges, stats, all_ids_ordered, all_texts_ordered
 
-    return nodes, edges, stats
+
+# ── embedding ──────────────────────────────────────────────────────────────────
+
+def _worker_embed(args: Tuple[List[str], int]) -> Tuple[int, List[str]]:
+    """Top-level function (required for pickling by ProcessPoolExecutor).
+    Each worker loads its own SentenceTransformer instance."""
+    texts, chunk_idx = args
+    from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+    import base64 as _b64, numpy as _np  # noqa: PLC0415
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    vecs = model.encode(
+        texts,
+        batch_size=32,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    ).astype("float32")
+    encoded = [_b64.b64encode(v.tobytes()).decode("ascii") for v in vecs]
+    return chunk_idx, encoded
 
 
-def build_html(nodes: List[dict], edges: List[dict], stats: dict, source_csv: Path) -> str:
-    nodes_json = json.dumps(nodes, ensure_ascii=False)
-    edges_json = json.dumps(edges, ensure_ascii=False)
-    stats_json = json.dumps(stats, ensure_ascii=False)
-    source_csv_str = html.escape(str(source_csv))
+def embed_texts(texts: List[str], n_workers: int = 1) -> Optional[List[str]]:
+    """
+    Embed texts with all-MiniLM-L6-v2 using ProcessPoolExecutor.
+    Returns list of base64-encoded float32 vectors, or None on failure.
+    Each worker loads its own model — safe for multiprocessing.
+    """
+    if not (HAS_ST and HAS_NP):
+        tqdm.write("  [SKIP] sentence-transformers or numpy not installed.")
+        tqdm.write("         pip install sentence-transformers numpy")
+        return None
 
-    html_text = r"""<!DOCTYPE html>
+    n = len(texts)
+    # Clamp workers to sensible range
+    n_workers = max(1, min(n_workers, os.cpu_count() or 1, math.ceil(n / 50)))
+    chunk_size = math.ceil(n / n_workers)
+    chunks = [
+        (texts[i : i + chunk_size], i // chunk_size)
+        for i in range(0, n, chunk_size)
+    ]
+
+    tqdm.write(f"  Embedding {n} texts across {n_workers} worker(s) "
+               f"({chunk_size} texts/worker) …")
+
+    results: List[Optional[List[str]]] = [None] * len(chunks)
+
+    if n_workers == 1:
+        # Single-process path — tqdm works normally
+        _, encoded = _worker_embed((texts, 0))
+        results[0] = encoded
+    else:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futures = {ex.submit(_worker_embed, chunk): chunk[1] for chunk in chunks}
+            with tqdm(total=len(chunks), desc="  Embedding chunks", unit="chunk") as bar:
+                for fut in concurrent.futures.as_completed(futures):
+                    chunk_idx, encoded = fut.result()
+                    results[chunk_idx] = encoded
+                    bar.update(1)
+
+    # Flatten in chunk order
+    flat: List[str] = []
+    for r in results:
+        flat.extend(r)  # type: ignore[arg-type]
+
+    kb = sum(len(e) for e in flat) // 1024
+    tqdm.write(f"  Embedded {len(flat)} vectors → {kb} KB (baked into HTML)")
+    return flat
+
+
+# ── HTML template ──────────────────────────────────────────────────────────────
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Actionable–Dictionary Group Network Explorer</title>
 
   <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 
+  <!-- Transformers.js — loaded for QUERY embedding only; node vecs are baked -->
+  <script type="module">
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js';
+    env.allowLocalModels = false;
+    window.__transformers = { pipeline, env };
+    window.__transformersReady = true;
+    window.dispatchEvent(new Event('transformers-ready'));
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
   <style>
     :root {
-      --bg: #f6f8fb;
-      --card: #ffffff;
-      --text: #0f172a;
-      --muted: #64748b;
-      --border: #dbe4f0;
-      --shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
-      --dict: #6baed6;
-      --action: #fb6a4a;
-      --accent: #2563eb;
-      --selected: #e0f2fe;
+      --bg:#f2f6fc; --surface:#fff; --surface2:#f8fafd; --border:#dbe4f0;
+      --text:#0f172a; --muted:#64748b; --accent:#2563eb;
+      --dict:#6baed6; --action:#fb6a4a;
+      --shadow:0 8px 28px rgba(15,23,42,.09); --radius:16px;
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%;font-family:'IBM Plex Sans',system-ui,sans-serif;
+              background:var(--bg);color:var(--text)}
+
+    div.vis-tooltip{
+      position:absolute;visibility:hidden;padding:9px 13px;max-width:380px;
+      white-space:normal;word-break:break-word;font-size:13px;
+      color:var(--text);background:var(--surface);border:1px solid var(--border);
+      border-radius:10px;box-shadow:var(--shadow);z-index:10;pointer-events:none;line-height:1.5
     }
 
-    * { box-sizing: border-box; }
+    /* ── layout ── */
+    .app{display:flex;height:100vh;overflow:hidden}
+    .main{display:flex;flex-direction:column;flex:1 1 0;min-width:0;overflow:hidden}
 
-    body {
-      margin: 0;
-      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--text);
-      background: linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
-    }
+    /* ── topbar ── */
+    .topbar{background:var(--surface);border-bottom:1px solid var(--border);
+            padding:10px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex-shrink:0}
+    .topbar-brand{flex:1;min-width:0}
+    .eyebrow{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+             color:var(--accent);margin-bottom:2px}
+    .topbar h1{font-size:15px;font-weight:700;line-height:1.2}
+    .stat-chips{display:flex;gap:8px;flex-wrap:wrap}
+    .stat-chip{font-size:11px;font-family:'IBM Plex Mono',monospace;padding:4px 9px;
+               border-radius:99px;border:1px solid var(--border);background:var(--surface2);color:var(--muted)}
+    .stat-chip b{color:var(--text)}
 
-    div.vis-tooltip {
-      position: absolute;
-      visibility: hidden;
-      padding: 8px 10px;
-      max-width: 420px;
-      white-space: normal;
-      word-break: break-word;
-      overflow-wrap: anywhere;
-      line-height: 1.45;
-      font-size: 14px;
-      color: #0f172a;
-      background: #ffffff;
-      border: 1px solid #dbe4f0;
-      border-radius: 10px;
-      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.12);
-      z-index: 5;
-      pointer-events: none;
-    }
+    /* ── AI pill ── */
+    .ai-pill{display:flex;align-items:center;gap:6px;flex-shrink:0;min-width:200px;
+             padding:5px 11px;border-radius:99px;font-size:11px;font-weight:700;
+             font-family:'IBM Plex Mono',monospace;border:1px solid var(--border);
+             background:var(--surface2);color:var(--muted);transition:all .3s}
+    .ai-pill.loading{border-color:#f59e0b;color:#b45309;background:#fffbeb}
+    .ai-pill.ready  {border-color:#16a34a;color:#15803d;background:#f0fdf4}
+    .ai-pill.error  {border-color:#dc2626;color:#b91c1c;background:#fef2f2}
+    .ai-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:currentColor}
+    .ai-pill-body{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+    .ai-pill-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ai-progress-track{height:3px;border-radius:99px;background:rgba(0,0,0,.10);
+                       overflow:hidden;display:none}
+    .ai-progress-track.visible{display:block}
+    .ai-progress-fill{height:100%;border-radius:99px;background:currentColor;
+                      width:0%;transition:width .25s ease}
+    .ai-pill.loading .ai-dot{animation:pulse .8s ease-in-out infinite alternate}
+    @keyframes pulse{from{opacity:.3}to{opacity:1}}
 
-    .app-shell {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
-      gap: 20px;
-      min-height: 100vh;
-      padding: 24px;
-    }
+    /* ── stabilisation overlay ── */
+    .stab-overlay{position:absolute;inset:0;display:flex;flex-direction:column;
+                  align-items:center;justify-content:center;gap:12px;z-index:6;
+                  background:rgba(242,246,252,.88);backdrop-filter:blur(4px);
+                  transition:opacity .4s}
+    .stab-overlay.hidden{opacity:0;pointer-events:none}
+    .stab-spinner{width:36px;height:36px;border:3px solid var(--border);
+                  border-top-color:var(--accent);border-radius:50%;
+                  animation:spin .7s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .stab-text{font-size:12px;color:var(--muted);font-family:'IBM Plex Mono',monospace}
+    .stab-bar-track{width:220px;height:4px;border-radius:99px;background:var(--border)}
+    .stab-bar-fill{height:100%;border-radius:99px;background:var(--accent);
+                   width:0%;transition:width .2s}
 
-    .main-stage { min-width: 0; }
+    /* ── network ── */
+    .net-wrap{flex:1 1 0;min-height:0;position:relative;
+              background:linear-gradient(160deg,#f8fbff 0%,#eef4fb 100%)}
+    #mynetwork{width:100%;height:100%}
+    .net-toolbar{position:absolute;top:12px;left:12px;right:12px;display:flex;
+                 justify-content:space-between;align-items:center;gap:10px;
+                 pointer-events:none;z-index:4}
+    .net-summary{background:rgba(255,255,255,.88);backdrop-filter:blur(6px);
+                 border:1px solid var(--border);border-radius:10px;
+                 padding:6px 12px;font-size:11px;color:var(--muted)}
+    .legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--muted);
+            background:rgba(255,255,255,.88);backdrop-filter:blur(6px);
+            border:1px solid var(--border);border-radius:10px;padding:6px 12px}
+    .legend-item{display:flex;align-items:center;gap:5px}
+    .leg-dot{width:9px;height:9px;border-radius:50%}
 
-    .hero-card,
-    .network-card,
-    .side-panel {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      box-shadow: var(--shadow);
-    }
+    /* ── side panel ── */
+    .side{flex:0 0 340px;width:340px;height:100vh;overflow-y:auto;
+          background:var(--surface);border-left:1px solid var(--border);
+          display:flex;flex-direction:column}
+    .side-section{padding:13px 15px;border-bottom:1px solid var(--border)}
+    .side-section:last-child{border-bottom:none;flex:1}
+    .section-head{display:flex;justify-content:space-between;align-items:center;
+                  font-size:10px;font-weight:700;text-transform:uppercase;
+                  letter-spacing:.07em;color:var(--muted);margin-bottom:8px}
+    .badge{background:#eff6ff;color:#1d4ed8;border-radius:99px;
+           padding:2px 7px;font-size:10px;font-weight:800}
 
-    .hero-card {
-      padding: 24px 26px;
-      margin-bottom: 18px;
-    }
+    /* ── search row ── */
+    .search-row{display:flex;gap:6px;align-items:center}
+    .search-wrap{position:relative;flex:1}
+    .search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);
+                 color:var(--muted);font-size:14px;pointer-events:none}
+    .search-input{width:100%;padding:9px 30px 9px 30px;border:1px solid var(--border);
+                  border-radius:10px;background:var(--surface2);color:var(--text);
+                  font-size:12px;font-family:'IBM Plex Sans',sans-serif;outline:none;
+                  transition:border-color .15s,box-shadow .15s}
+    .search-input::placeholder{color:var(--muted)}
+    .search-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+    .search-clear{position:absolute;right:8px;top:50%;transform:translateY(-50%);
+                  background:none;border:none;color:var(--muted);cursor:pointer;
+                  font-size:14px;display:none;padding:2px}
+    .search-clear.visible{display:block}
+    .search-btn{flex-shrink:0;padding:9px 14px;background:var(--accent);color:#fff;
+                border:none;border-radius:10px;font-size:12px;font-weight:700;
+                cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+                transition:opacity .15s;white-space:nowrap}
+    .search-btn:hover{opacity:.85}
 
-    .hero-eyebrow,
-    .panel-eyebrow {
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--accent);
-      margin-bottom: 8px;
-    }
+    /* ── mode banner ── */
+    .search-mode-banner{display:flex;align-items:center;gap:6px;padding:5px 9px;
+                        border-radius:7px;font-size:10px;font-weight:700;
+                        font-family:'IBM Plex Mono',monospace;margin-top:6px;
+                        border:1px solid transparent;transition:all .25s}
+    .smb-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+    .search-mode-banner.smb-semantic{background:#f0fdf4;border-color:#86efac;color:#15803d}
+    .search-mode-banner.smb-keyword {background:#eff6ff;border-color:#93c5fd;color:#1d4ed8}
+    .search-mode-banner.smb-fallback{background:#fffbeb;border-color:#fcd34d;color:#92400e}
+    .search-mode-banner.smb-error   {background:#fef2f2;border-color:#fca5a5;color:#991b1b}
 
-    h1, h2, p { margin: 0; }
+    /* ── threshold / mode toggle ── */
+    .threshold-row{display:flex;align-items:center;gap:8px;margin-top:6px;
+                   font-size:11px;color:var(--muted)}
+    .threshold-row input[type=range]{flex:1;accent-color:var(--accent)}
+    .threshold-val{font-family:'IBM Plex Mono',monospace;font-size:11px;
+                   color:var(--accent);min-width:28px;text-align:right}
+    .mode-toggle{display:flex;gap:6px;margin-top:6px}
+    .mode-pill{padding:5px 10px;border-radius:99px;font-size:11px;font-weight:700;
+               border:1px solid var(--border);background:var(--surface2);color:var(--muted);
+               cursor:pointer;transition:all .15s}
+    .mode-pill.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-    h1 {
-      font-size: 32px;
-      line-height: 1.1;
-      margin-bottom: 10px;
-    }
+    /* ── syntax hint ── */
+    .syntax-hint{background:var(--surface2);border:1px solid var(--border);
+                 border-radius:8px;padding:8px 10px;margin-top:6px;
+                 font-size:10px;color:var(--muted);display:none;line-height:1.7}
+    .syntax-hint.visible{display:block}
+    .syntax-hint code{font-family:'IBM Plex Mono',monospace;font-size:10px;
+                      background:var(--border);border-radius:3px;padding:1px 4px;color:var(--text)}
+    .hint-row{display:flex;justify-content:space-between;gap:6px}
 
-    .hero-card p,
-    .panel-copy {
-      color: var(--muted);
-      line-height: 1.55;
-    }
+    /* ── buttons ── */
+    .btn-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+    .btn{padding:7px 12px;border-radius:8px;font-size:11px;font-weight:700;
+         border:1px solid transparent;cursor:pointer;
+         font-family:'IBM Plex Sans',sans-serif;transition:opacity .15s,transform .1s}
+    .btn:hover{opacity:.85;transform:translateY(-1px)}
+    .btn-primary  {background:var(--accent);color:#fff}
+    .btn-secondary{background:var(--surface2);color:var(--text);border-color:var(--border)}
 
-    .network-card { overflow: hidden; }
+    /* ── stats grid ── */
+    .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .stat-box{background:var(--surface2);border:1px solid var(--border);
+              border-radius:10px;padding:9px}
+    .stat-label{font-size:10px;color:var(--muted);margin-bottom:3px;
+                text-transform:uppercase;letter-spacing:.05em}
+    .stat-val{font-size:20px;font-weight:800;font-family:'IBM Plex Mono',monospace}
 
-    .network-toolbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 16px;
-      padding: 18px 20px;
-      border-bottom: 1px solid var(--border);
-      background: #fbfdff;
-    }
+    /* ── group list ── */
+    .group-list{display:flex;flex-direction:column;gap:5px;
+                max-height:220px;overflow-y:auto}
+    .group-item{width:100%;text-align:left;border:1px solid var(--border);
+                background:var(--surface2);color:var(--text);padding:8px 10px;
+                border-radius:9px;font-size:11px;font-weight:600;cursor:pointer;
+                font-family:'IBM Plex Sans',sans-serif;transition:border-color .12s;
+                display:flex;align-items:center;justify-content:space-between;gap:6px}
+    .group-item:hover{border-color:var(--accent)}
+    .group-item.selected{background:#eff6ff;border-color:#93c5fd;color:#1e3a8a}
+    .group-item.matched {border-color:var(--accent)}
+    .sim-score{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--accent);flex-shrink:0}
+    .empty-note{border:1px dashed var(--border);border-radius:9px;padding:9px;
+                color:var(--muted);font-size:11px;text-align:center}
 
-    .toolbar-title {
-      font-size: 18px;
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
+    /* ── detail card ── */
+    .detail-card{background:var(--surface2);border:1px solid var(--border);
+                 border-radius:10px;padding:12px;font-size:11px;color:var(--muted);
+                 line-height:1.6;transition:opacity .15s,transform .15s}
+    .detail-card.animating{opacity:0;transform:translateY(5px)}
+    .detail-title{font-size:13px;font-weight:800;color:var(--text);
+                  margin-bottom:8px;line-height:1.3}
+    .dlabel{font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+            color:var(--muted);margin-top:9px;margin-bottom:3px}
+    .dval{color:var(--text);font-size:11px;white-space:pre-wrap;line-height:1.5}
+    .tag{display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;margin:1px}
+    .tag-a{background:rgba(251,106,74,.15);color:#c2410c}
+    .tag-d{background:rgba(107,174,214,.15);color:#1d4ed8}
+    .chip-wrap{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
+    .chip{background:#eff6ff;color:#1e3a8a;border-radius:5px;
+          padding:3px 7px;font-size:10px;font-weight:600}
+    .sim-bar-wrap{margin-top:8px}
+    .sim-bar-label{font-size:9px;color:var(--muted);margin-bottom:4px;
+                   text-transform:uppercase;letter-spacing:.06em}
+    .sim-bar-track{height:5px;border-radius:99px;background:var(--border);overflow:hidden}
+    .sim-bar-fill{height:100%;border-radius:99px;background:var(--accent);
+                  transition:width .4s ease}
 
-    .toolbar-subtitle {
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.4;
-    }
-
-    .legend {
-      display: flex;
-      gap: 14px;
-      flex-wrap: wrap;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .legend-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .legend-dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 999px;
-      display: inline-block;
-    }
-
-    .dict-dot { background: var(--dict); }
-    .action-dot { background: var(--action); }
-    .match-ring {
-      width: 12px;
-      height: 12px;
-      border-radius: 999px;
-      display: inline-block;
-      border: 3px solid #111827;
-      background: white;
-    }
-
-    #mynetwork {
-      width: 100%;
-      height: calc(100vh - 210px);
-      min-height: 620px;
-      background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
-    }
-
-    .side-panel {
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 18px;
-      position: sticky;
-      top: 24px;
-      max-height: calc(100vh - 48px);
-      overflow: auto;
-    }
-
-    .panel-section {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    .panel-section h2 {
-      font-size: 24px;
-      line-height: 1.15;
-    }
-
-    .panel-search {
-      width: 100%;
-      padding: 12px 14px;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      font-size: 14px;
-      outline: none;
-    }
-
-    .panel-search:focus {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08);
-    }
-
-    .panel-actions {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .primary-btn,
-    .secondary-btn {
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 14px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: 0.15s ease;
-    }
-
-    .primary-btn {
-      background: var(--accent);
-      color: white;
-    }
-
-    .secondary-btn {
-      background: #eef4fb;
-      color: #1e293b;
-    }
-
-    .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      font-weight: 700;
-    }
-
-    .count-badge,
-    .muted-mini {
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    .count-badge {
-      background: #eff6ff;
-      color: #1d4ed8;
-      border-radius: 999px;
-      padding: 4px 8px;
-      font-weight: 700;
-    }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-
-    .stat-card {
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 12px;
-      background: #fcfdff;
-    }
-
-    .stat-label {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-
-    .stat-value {
-      font-size: 22px;
-      font-weight: 800;
-    }
-
-    .chips-wrap,
-    .mini-chip-wrap {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .empty-state {
-      border: 1px dashed var(--border);
-      border-radius: 12px;
-      padding: 12px;
-      color: var(--muted);
-      background: #fafcff;
-      font-size: 14px;
-    }
-
-    .mini-chip,
-    .selected-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 10px;
-      border-radius: 999px;
-      background: #eff6ff;
-      color: #1e3a8a;
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .group-list-section {
-      min-height: 220px;
-    }
-
-    .group-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-height: 320px;
-      overflow: auto;
-      padding-right: 2px;
-    }
-
-    .group-item {
-      width: 100%;
-      text-align: left;
-      border: 1px solid var(--border);
-      background: white;
-      color: var(--text);
-      padding: 11px 12px;
-      border-radius: 12px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-
-    .group-item.selected {
-      background: var(--selected);
-      border-color: #93c5fd;
-      color: #0f3d91;
-    }
-
-    .group-item.matched {
-      border-color: #1d4ed8;
-      box-shadow: inset 0 0 0 1px #1d4ed8;
-      background: #eff6ff;
-    }
-
-    .info-card {
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 14px;
-      background: #fcfdff;
-      color: var(--muted);
-      line-height: 1.55;
-      font-size: 14px;
-    }
-
-    .info-title {
-      color: var(--text);
-      font-size: 16px;
-      font-weight: 800;
-      margin-bottom: 8px;
-    }
-
-    .info-text {
-      color: #334155;
-      white-space: pre-wrap;
-      margin-bottom: 12px;
-    }
-
-    .info-subtitle {
-      color: var(--muted);
-      font-weight: 700;
-      font-size: 12px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      margin-bottom: 8px;
-    }
-
-    @media (max-width: 1100px) {
-      .app-shell {
-        grid-template-columns: 1fr;
-      }
-
-      .side-panel {
-        position: static;
-        max-height: none;
-      }
-
-      #mynetwork {
-        height: 680px;
-      }
+    @media(max-width:960px){
+      .app{flex-direction:column;height:auto}
+      .main,.net-wrap{min-height:520px}
+      .side{height:auto;width:100%;flex:none}
     }
   </style>
 </head>
 <body>
-  <div class="app-shell">
-    <main class="main-stage">
-      <div class="hero-card">
-        <div class="hero-eyebrow">Interactive actionable relationship map</div>
-        <h1>Actionable–Dictionary Group Network Explorer</h1>
-        <p>
-          This network was generated from
-          <strong>__SOURCE_CSV__</strong>.
-          Search works across both sides of the graph, and directly matched nodes are highlighted.
-        </p>
-        <div id="statusBox" class="loading">Network loaded successfully.</div>
-      </div>
+<div class="app">
+  <main class="main">
 
-      <div class="network-card">
-        <div class="network-toolbar">
-          <div>
-            <div class="toolbar-title">Network view</div>
-            <div class="toolbar-subtitle" id="networkSummary">Preparing network…</div>
-          </div>
-          <div class="legend">
-            <span class="legend-item"><span class="legend-dot dict-dot"></span> Dictionary groups</span>
-            <span class="legend-item"><span class="legend-dot action-dot"></span> Actionables</span>
-          </div>
-        </div>
-        <div id="mynetwork"></div>
+    <!-- topbar -->
+    <div class="topbar">
+      <div class="topbar-brand">
+        <div class="eyebrow">OVC Analysis &middot; Actionable Network</div>
+        <h1>Actionable &ndash; Dictionary Group Explorer</h1>
       </div>
-    </main>
-
-    <aside class="side-panel">
-      <div class="panel-section">
-        <div class="panel-eyebrow">Interactive dictionary-group explorer</div>
-        <h2>Dictionary Group Panel</h2>
-        <p class="panel-copy">
-          Search checks both dictionary-group fields and actionable-side fields. Direct matches are highlighted,
-          and connected neighbors are included automatically.
-        </p>
+      <div class="stat-chips">
+        <div class="stat-chip"><b id="scRows">0</b> rows</div>
+        <div class="stat-chip"><b id="scGroups">0</b> groups</div>
+        <div class="stat-chip"><b id="scActions">0</b> actionables</div>
+        <div class="stat-chip"><b id="scEdges">0</b> edges</div>
       </div>
-
-      <div class="panel-section">
-        <input id="groupSearch" class="panel-search" type="text" placeholder="Search groups, phrases, actionables, evidence, article..." />
-        <div class="panel-actions">
-          <button id="selectVisibleBtn" class="secondary-btn">Select visible groups</button>
-          <button id="clearSelectionBtn" class="secondary-btn">Clear selection</button>
-          <button id="showAllBtn" class="primary-btn">Show full network</button>
-        </div>
-      </div>
-
-      <div class="panel-section">
-        <div class="section-header">
-          <span>Selected dictionary groups</span>
-          <span id="selectedCountBadge" class="count-badge">0</span>
-        </div>
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-label">Total groups</div>
-            <div class="stat-value" id="totalGroupsStat">0</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Selected</div>
-            <div class="stat-value" id="selectedGroupsStat">0</div>
+      <div class="ai-pill" id="aiPill">
+        <span class="ai-dot"></span>
+        <div class="ai-pill-body">
+          <span class="ai-pill-text" id="aiPillText">Initialising&hellip;</span>
+          <div class="ai-progress-track" id="aiProgressTrack">
+            <div class="ai-progress-fill" id="aiProgressFill"></div>
           </div>
         </div>
-        <div id="selectedGroupsChips" class="chips-wrap empty-state">No dictionary groups selected</div>
       </div>
+    </div>
 
-      <div class="panel-section group-list-section">
-        <div class="section-header">
-          <span>Available dictionary groups</span>
-          <span id="shownGroupsLabel" class="muted-mini">0 shown</span>
-        </div>
-        <div id="groupList" class="group-list"></div>
-      </div>
-
-      <div class="panel-section">
-        <div class="section-header">
-          <span>Details</span>
-        </div>
-        <div id="detailsInfo" class="info-card">
-          Click an actionable node to inspect the actionable details. Click a dictionary-group node to inspect the group and phrases.
+    <!-- canvas -->
+    <div class="net-wrap">
+      <div class="net-toolbar">
+        <div class="net-summary" id="netSummary">Loading&hellip;</div>
+        <div class="legend">
+          <span class="legend-item"><span class="leg-dot" style="background:#6baed6"></span>Dict group</span>
+          <span class="legend-item"><span class="leg-dot" style="background:#fb6a4a"></span>Actionable</span>
         </div>
       </div>
-    </aside>
-  </div>
 
-  <script>
-    const ALL_NODES = __NODES_JSON__;
-    const ALL_EDGES = __EDGES_JSON__;
-    const GRAPH_STATS = __STATS_JSON__;
+      <!-- stabilisation overlay — shown while physics runs -->
+      <div class="stab-overlay" id="stabOverlay">
+        <div class="stab-spinner"></div>
+        <div class="stab-text" id="stabText">Laying out graph&hellip;</div>
+        <div class="stab-bar-track"><div class="stab-bar-fill" id="stabBarFill"></div></div>
+      </div>
 
-    let network = null;
-    let nodesDS = null;
-    let edgesDS = null;
+      <div id="mynetwork"></div>
+    </div>
 
-    const nodeMap = new Map(ALL_NODES.map(n => [String(n.id), n]));
-    const dictGroupIds = ALL_NODES
-      .filter(n => n.node_type === "dictionary_group")
-      .map(n => String(n.id))
-      .sort((a, b) => {
-        const na = nodeMap.get(a)?.dictionary_group || "";
-        const nb = nodeMap.get(b)?.dictionary_group || "";
-        return na.localeCompare(nb);
-      });
+  </main>
 
-    const actionableIds = ALL_NODES
-      .filter(n => n.node_type === "actionable")
-      .map(n => String(n.id));
+  <!-- side panel -->
+  <aside class="side">
 
-    const groupToActionables = new Map();
-    const actionableToGroups = new Map();
+    <div class="side-section">
+      <div class="section-head">Search</div>
 
-    for (const gid of dictGroupIds) groupToActionables.set(gid, new Set());
-    for (const aid of actionableIds) actionableToGroups.set(aid, new Set());
+      <!-- search row: input + button side by side -->
+      <div class="search-row">
+        <div class="search-wrap">
+          <span class="search-icon">&#128269;</span>
+          <input id="searchBox" class="search-input" type="text"
+                 placeholder="Type then press Enter or Search&hellip;"/>
+          <button class="search-clear" id="searchClear" title="Clear">&#10005;</button>
+        </div>
+        <button class="search-btn" id="searchBtn" onclick="commitSearch()">Search</button>
+      </div>
 
-    for (const edge of ALL_EDGES) {
-      const fromId = String(edge.from);
-      const toId = String(edge.to);
+      <!-- active search mode banner -->
+      <div class="search-mode-banner smb-fallback" id="searchModeBanner">
+        <span class="smb-dot"></span>
+        <span id="smbText">Keyword search active &mdash; semantic model loading&hellip;</span>
+      </div>
 
-      if (!groupToActionables.has(fromId)) groupToActionables.set(fromId, new Set());
-      if (!actionableToGroups.has(toId)) actionableToGroups.set(toId, new Set());
+      <!-- threshold slider (semantic only) -->
+      <div class="threshold-row" id="thresholdRow">
+        <span>Threshold</span>
+        <input type="range" id="thresholdSlider" min="5" max="80" value="30" step="1"/>
+        <span class="threshold-val" id="thresholdVal">0.30</span>
+      </div>
 
-      groupToActionables.get(fromId).add(toId);
-      actionableToGroups.get(toId).add(fromId);
-    }
+      <!-- mode toggle -->
+      <div class="mode-toggle">
+        <button class="mode-pill active" id="pillSemantic" onclick="setSearchMode('semantic')">&#129504; Semantic</button>
+        <button class="mode-pill"        id="pillKeyword"  onclick="setSearchMode('keyword')">&#128190; Keyword</button>
+      </div>
 
-    let selectedGroups = new Set();
-    let searchText = "";
+      <!-- keyword syntax hint -->
+      <div class="syntax-hint" id="syntaxHint">
+        <div style="font-weight:700;color:var(--text);margin-bottom:4px">Keyword syntax</div>
+        <div class="hint-row"><span><code>stenosis occlusion</code></span><span>AND</span></div>
+        <div class="hint-row"><span><code>stenosis OR fistula</code></span><span>either</span></div>
+        <div class="hint-row"><span><code>"luminal narrowing"</code></span><span>exact phrase</span></div>
+        <div class="hint-row"><span><code>stenosis -artifact</code></span><span>exclude</span></div>
+        <div class="hint-row"><span><code>sten*</code></span><span>wildcard</span></div>
+      </div>
 
-    function escapeHtml(value) {
-      return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-    }
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="fitView()">Fit view</button>
+        <button class="btn btn-primary"   onclick="showAll()">Show all</button>
+      </div>
+    </div>
 
-    function setDefaultInfo() {
-      document.getElementById("detailsInfo").innerHTML =
-        "Click an actionable node to inspect the actionable details. Click a dictionary-group node to inspect the group and phrases.";
-    }
+    <div class="side-section">
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-label">Dict. groups</div>
+          <div class="stat-val" style="color:#6baed6" id="statGroups">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Actionables</div>
+          <div class="stat-val" style="color:#fb6a4a" id="statActions">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Selected</div>
+          <div class="stat-val" style="color:var(--accent)" id="statSelected">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Visible edges</div>
+          <div class="stat-val" id="statEdges">0</div>
+        </div>
+      </div>
+    </div>
 
-    function nodeMatchesSearch(node, term) {
-      if (!term) return false;
-      return String(node.search_blob || "").includes(term);
-    }
+    <div class="side-section">
+      <div class="section-head">
+        <span>Dictionary groups</span>
+        <span class="badge" id="groupCountBadge">0</span>
+      </div>
+      <div id="groupList" class="group-list"></div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn btn-secondary" onclick="selectVisible()">Select visible</button>
+        <button class="btn btn-secondary" onclick="clearSelection()">Clear</button>
+      </div>
+    </div>
 
-    function getSearchState(term) {
-      if (!term) {
-        return null;
-      }
+    <div class="side-section">
+      <div class="section-head">Details</div>
+      <div id="detailPanel" class="detail-card">Click any node to inspect details.</div>
+    </div>
 
-      const directMatchedGroups = new Set();
-      const directMatchedActionables = new Set();
+  </aside>
+</div>
 
-      for (const node of ALL_NODES) {
-        if (!nodeMatchesSearch(node, term)) continue;
+<script>
+// ── injected data ──────────────────────────────────────────────────────────────
+const ALL_NODES        = __NODES_JSON__;
+const ALL_EDGES        = __EDGES_JSON__;
+const GRAPH_STATS      = __STATS_JSON__;
+// {nodeId: base64_float32_384d} baked by Python, or null if --skip-embed used
+const BAKED_EMBEDDINGS = __BAKED_EMBEDDINGS__;
+// ──────────────────────────────────────────────────────────────────────────────
 
-        if (node.node_type === "dictionary_group") {
-          directMatchedGroups.add(String(node.id));
-        } else if (node.node_type === "actionable") {
-          directMatchedActionables.add(String(node.id));
-        }
-      }
+// ── lookup structures ──────────────────────────────────────────────────────────
+const nodeMap = new Map(ALL_NODES.map(n => [String(n.id), n]));
+const dictGroupIds = ALL_NODES
+  .filter(n => n.node_type === "dictionary_group")
+  .map(n => String(n.id))
+  .sort((a,b) => (nodeMap.get(a)?.dictionary_group||"").localeCompare(nodeMap.get(b)?.dictionary_group||""));
+const actionableIds = ALL_NODES.filter(n => n.node_type === "actionable").map(n => String(n.id));
 
-      const visibleGroups = new Set(directMatchedGroups);
-      const visibleActionables = new Set(directMatchedActionables);
+const groupToActions = new Map(dictGroupIds.map(id => [id, new Set()]));
+const actionToGroups = new Map(actionableIds.map(id => [id, new Set()]));
+for (const e of ALL_EDGES) {
+  const f = String(e.from), t = String(e.to);
+  if (!groupToActions.has(f)) groupToActions.set(f, new Set());
+  if (!actionToGroups.has(t)) actionToGroups.set(t, new Set());
+  groupToActions.get(f).add(t);
+  actionToGroups.get(t).add(f);
+}
 
-      for (const aid of directMatchedActionables) {
-        const neighbors = actionableToGroups.get(aid) || new Set();
-        for (const gid of neighbors) visibleGroups.add(gid);
-      }
+// ── state ──────────────────────────────────────────────────────────────────────
+let network        = null;
+let nodesDS        = null;
+let edgesDS        = null;
+let selectedGroups = new Set();
+let committedSearch = "";      // only updated on Enter / Search button
+let searchMode      = "semantic";
+let threshold       = 0.30;
+let lastActiveMode  = "fallback";
 
-      for (const gid of directMatchedGroups) {
-        const neighbors = groupToActionables.get(gid) || new Set();
-        for (const aid of neighbors) visibleActionables.add(aid);
-      }
+// ── semantic state ─────────────────────────────────────────────────────────────
+let embedder       = null;
+let nodeEmbeddings = null;   // Map<id, Float32Array> — from BAKED_EMBEDDINGS
+let embedReady     = false;
+let simScores      = new Map();
 
-      return {
-        directMatchedGroups,
-        directMatchedActionables,
-        visibleGroups,
-        visibleActionables
-      };
-    }
+// ── AI pill helpers ────────────────────────────────────────────────────────────
+function setAIPill(state, text, pct) {
+  const pill  = document.getElementById("aiPill");
+  const track = document.getElementById("aiProgressTrack");
+  const fill  = document.getElementById("aiProgressFill");
+  pill.className = "ai-pill " + state;
+  document.getElementById("aiPillText").textContent = text;
+  if (pct != null) {
+    track.classList.add("visible");
+    fill.style.width = pct + "%";
+  } else {
+    track.classList.remove("visible");
+    fill.style.width = "0%";
+  }
+}
 
-    function getSelectionState() {
-      if (!selectedGroups.size) {
-        return null;
-      }
+function setModeBanner(state) {
+  const el = document.getElementById("searchModeBanner");
+  el.className = "search-mode-banner smb-" +
+    (state==="semantic"?"semantic":state==="keyword"?"keyword":state==="error"?"error":"fallback");
+  const labels = {
+    semantic: "🧠 Semantic search active",
+    keyword:  "🔤 Keyword search active",
+    fallback: "⚠ Keyword fallback — semantic model loading…",
+    error:    "⚠ Keyword fallback — semantic model unavailable",
+  };
+  document.getElementById("smbText").textContent = labels[state] || labels.fallback;
+}
 
-      const visibleGroups = new Set(selectedGroups);
-      const visibleActionables = new Set();
+// ── baked embeddings deserialisation ──────────────────────────────────────────
+// Reads BAKED_EMBEDDINGS (injected by Python) into a Map<id, Float32Array>.
+// This is pure JS — no network, no WASM, no progress bar. Takes < 100 ms.
+function loadBakedEmbeddings() {
+  if (!BAKED_EMBEDDINGS) return null;
+  const map = new Map();
+  for (const [id, b64] of Object.entries(BAKED_EMBEDDINGS)) {
+    const bin = atob(b64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    map.set(id, new Float32Array(buf.buffer));
+  }
+  return map;
+}
 
-      for (const gid of selectedGroups) {
-        const neighbors = groupToActionables.get(gid) || new Set();
-        for (const aid of neighbors) visibleActionables.add(aid);
-      }
+// ── Transformers.js bootstrap (query embedding only) ──────────────────────────
+async function bootstrapEmbedder() {
+  // Step 1: deserialise baked node vectors (instant, no network)
+  const baked = loadBakedEmbeddings();
+  if (!baked) {
+    setAIPill("error", "No baked embeddings — keyword only");
+    lastActiveMode = "error";
+    setModeBanner("error");
+    return;
+  }
+  nodeEmbeddings = baked;
+  setAIPill("loading", `${baked.size} nodes loaded — loading query model…`, 0);
 
-      return {
-        visibleGroups,
-        visibleActionables
-      };
-    }
-
-    function intersectSets(a, b) {
-      return new Set([...a].filter(x => b.has(x)));
-    }
-
-    function cloneNode(node) {
-      return JSON.parse(JSON.stringify(node));
-    }
-
-    function getVisibleState() {
-      const term = searchText.trim().toLowerCase();
-      const searchState = getSearchState(term);
-      const selectionState = getSelectionState();
-
-      let finalGroupIds = null;
-      let finalActionableIds = null;
-
-      if (!searchState && !selectionState) {
-        finalGroupIds = new Set(dictGroupIds);
-        finalActionableIds = new Set(actionableIds);
-      } else if (searchState && !selectionState) {
-        finalGroupIds = new Set(searchState.visibleGroups);
-        finalActionableIds = new Set(searchState.visibleActionables);
-      } else if (!searchState && selectionState) {
-        finalGroupIds = new Set(selectionState.visibleGroups);
-        finalActionableIds = new Set(selectionState.visibleActionables);
-      } else {
-        finalGroupIds = intersectSets(selectionState.visibleGroups, searchState.visibleGroups);
-        finalActionableIds = intersectSets(selectionState.visibleActionables, searchState.visibleActionables);
-      }
-
-      const visibleEdges = ALL_EDGES.filter(edge => {
-        const gid = String(edge.from);
-        const aid = String(edge.to);
-        return finalGroupIds.has(gid) && finalActionableIds.has(aid);
-      });
-
-      const nodeIdsFromEdges = new Set();
-      for (const edge of visibleEdges) {
-        nodeIdsFromEdges.add(String(edge.from));
-        nodeIdsFromEdges.add(String(edge.to));
-      }
-
-      const visibleNodeIds = new Set(nodeIdsFromEdges);
-
-      if (visibleEdges.length === 0) {
-        for (const gid of finalGroupIds) visibleNodeIds.add(gid);
-        for (const aid of finalActionableIds) visibleNodeIds.add(aid);
-      }
-
-      const visibleNodes = ALL_NODES
-        .filter(node => visibleNodeIds.has(String(node.id)))
-        .map(node => {
-          const cloned = cloneNode(node);
-          const id = String(cloned.id);
-
-          const directlyMatched =
-            searchState &&
-            (
-              searchState.directMatchedGroups.has(id) ||
-              searchState.directMatchedActionables.has(id)
-            );
-
-          if (searchState) {
-            if (directlyMatched) {
-              if (cloned.node_type === "dictionary_group") {
-                cloned.size = 28;
-                cloned.borderWidth = 5;
-                cloned.color = {
-                  background: "#6baed6",
-                  border: "#1d4ed8",
-                  highlight: { background: "#6baed6", border: "#1d4ed8" },
-                  hover: { background: "#6baed6", border: "#1d4ed8" }
-                };
-              } else {
-                cloned.size = 24;
-                cloned.borderWidth = 5;
-                cloned.color = {
-                  background: "#fb6a4a",
-                  border: "#b91c1c",
-                  highlight: { background: "#fb6a4a", border: "#b91c1c" },
-                  hover: { background: "#fb6a4a", border: "#b91c1c" }
-                };
-              }
-            } else {
-              cloned.opacity = 0.55;
-            }
+  // Step 2: load Transformers.js for query embedding only
+  if (!window.__transformersReady) {
+    await new Promise(r => window.addEventListener('transformers-ready', r, {once: true}));
+  }
+  try {
+    const { pipeline } = window.__transformers;
+    embedder = await pipeline(
+      "feature-extraction",
+      "Xenova/all-MiniLM-L6-v2",
+      { progress_callback: (p) => {
+          if (p.status === "progress" && p.total) {
+            const pct = Math.round(p.loaded / p.total * 100);
+            setAIPill("loading", `Loading query model… ${pct}%`, pct);
           }
+      }}
+    );
+    embedReady = true;
+    setAIPill("ready", `Semantic search ready ✓  (${baked.size} nodes)`);
+    lastActiveMode = "semantic";
+    setModeBanner("semantic");
+    // Re-run search if user already committed one
+    if (committedSearch) runSearch();
+  } catch(err) {
+    console.error("Transformers.js:", err);
+    setAIPill("error", "Query model failed — keyword only");
+    lastActiveMode = "error";
+    setModeBanner("error");
+  }
+}
 
-          return cloned;
-        });
+function cosineSim(a, b) {
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
 
-      const styledEdges = visibleEdges.map(edge => {
-        const cloned = JSON.parse(JSON.stringify(edge));
-        const gid = String(cloned.from);
-        const aid = String(cloned.to);
+async function embedQuery(text) {
+  const out = await embedder([text], {pooling:"mean", normalize:true});
+  return out.data.slice(0, out.data.length);
+}
 
-        const edgeTouchesDirectMatch =
-          searchState &&
-          (
-            searchState.directMatchedGroups.has(gid) ||
-            searchState.directMatchedActionables.has(aid)
-          );
+// ── search: only fires on Enter / button click ─────────────────────────────────
+function commitSearch() {
+  committedSearch = document.getElementById("searchBox").value.trim();
+  runSearch();
+}
 
-        if (searchState) {
-          if (edgeTouchesDirectMatch) {
-            cloned.width = 2.6;
-            cloned.color = {
-              color: "#334155",
-              highlight: "#111827",
-              hover: "#111827",
-              opacity: 0.95
-            };
-          } else {
-            cloned.width = 1.2;
-            cloned.color = {
-              color: "#94a3b8",
-              highlight: "#64748b",
-              hover: "#64748b",
-              opacity: 0.5
-            };
-          }
-        }
+async function runSearch() {
+  const term = committedSearch;
 
-        return cloned;
-      });
+  if (!term) {
+    simScores = new Map();
+    setModeBanner(embedReady ? (searchMode==="keyword"?"keyword":"semantic") : lastActiveMode);
+    applyStyles();
+    renderGroupPanel();
+    return;
+  }
 
-      return {
-        visibleNodes,
-        visibleEdges: styledEdges,
-        searchState
-      };
-    }
-
-    function updateSummary(visibleNodes, visibleEdges, searchState) {
-      const visibleGroups = visibleNodes.filter(n => n.node_type === "dictionary_group").length;
-      const visibleActionables = visibleNodes.filter(n => n.node_type === "actionable").length;
-
-      let summary = `Showing ${visibleGroups} dictionary groups, ${visibleActionables} actionable items, and ${visibleEdges.length} relationships`;
-
-      if (selectedGroups.size && searchText.trim()) {
-        const directGroupMatches = searchState ? searchState.directMatchedGroups.size : 0;
-        const directActionableMatches = searchState ? searchState.directMatchedActionables.size : 0;
-        summary =
-          `Showing selection + search filter: ${visibleGroups} groups, ${visibleActionables} actionables, ${visibleEdges.length} relationships ` +
-          `(direct matches: ${directGroupMatches} groups, ${directActionableMatches} actionables)`;
-      } else if (selectedGroups.size) {
-        summary =
-          `Showing ${selectedGroups.size} selected group${selectedGroups.size > 1 ? "s" : ""}, ` +
-          `${visibleActionables} connected actionable item${visibleActionables !== 1 ? "s" : ""}, ` +
-          `and ${visibleEdges.length} relationship${visibleEdges.length !== 1 ? "s" : ""}`;
-      } else if (searchText.trim()) {
-        const directGroupMatches = searchState ? searchState.directMatchedGroups.size : 0;
-        const directActionableMatches = searchState ? searchState.directMatchedActionables.size : 0;
-        summary =
-          `Showing search-expanded subgraph with ${visibleGroups} groups, ${visibleActionables} actionables, and ${visibleEdges.length} relationships ` +
-          `(direct matches: ${directGroupMatches} groups, ${directActionableMatches} actionables)`;
+  if (searchMode === "semantic" && embedReady) {
+    try {
+      const qVec = await embedQuery(term);
+      simScores = new Map();
+      for (const [id, vec] of nodeEmbeddings) {
+        simScores.set(id, Math.max(0, cosineSim(qVec, vec)));
       }
-
-      document.getElementById("networkSummary").textContent = summary;
+      lastActiveMode = "semantic";
+      setModeBanner("semantic");
+    } catch(e) {
+      buildKeywordScores(term);
+      lastActiveMode = "error";
+      setModeBanner("error");
     }
+  } else if (searchMode === "semantic" && !embedReady) {
+    buildKeywordScores(term);
+    lastActiveMode = "fallback";
+    setModeBanner("fallback");
+  } else {
+    buildKeywordScores(term);
+    lastActiveMode = "keyword";
+    setModeBanner("keyword");
+  }
 
-    function showActionableInfo(nodeId) {
-      const node = nodeMap.get(String(nodeId));
-      if (!node) return;
+  applyStyles();
+  renderGroupPanel();
+}
 
-      document.getElementById("detailsInfo").innerHTML = `
-        <div class="info-title">${escapeHtml(node.label || node.id)}</div>
-        <div class="info-subtitle">Actionable</div>
-        <div class="info-text">${escapeHtml(node.actionable || "N/A")}</div>
-        <div class="info-subtitle">Evidence</div>
-        <div class="info-text">${escapeHtml(node.evidence || "N/A")}</div>
-        <div class="info-subtitle">Article title</div>
-        <div class="info-text">${escapeHtml(node.article_title || "N/A")}</div>
-        <div class="info-subtitle">Article year</div>
-        <div class="info-text">${escapeHtml(node.article_year || "N/A")}</div>
-      `;
+// ── keyword parser ─────────────────────────────────────────────────────────────
+function parseQuery(raw) {
+  const phrases = [];
+  const phraseRe = /"([^"]+)"/g;
+  let pm;
+  while ((pm = phraseRe.exec(raw)) !== null) phrases.push(pm[1].trim().toLowerCase());
+  let s = raw.replace(phraseRe, "\u0000").toLowerCase();
+  const tokens = [];
+  let pi = 0;
+  for (const part of s.split(/\s+/)) {
+    if (!part) continue;
+    if (part === "\u0000") { if (pi < phrases.length) tokens.push({type:"phrase",value:phrases[pi++]}); }
+    else tokens.push({type:"raw",value:part});
+  }
+  const orGroups = [[]], excludes = [];
+  for (const tok of tokens) {
+    if (tok.type === "phrase") { orGroups[orGroups.length-1].push({type:"phrase",value:tok.value}); continue; }
+    const v = tok.value;
+    if (v === "or") { orGroups.push([]); continue; }
+    if (v.startsWith("-") && v.length > 1) { excludes.push(v.slice(1)); continue; }
+    orGroups[orGroups.length-1].push({type: v.endsWith("*")?"wildcard":"term", value: v.endsWith("*")?v.slice(0,-1):v});
+  }
+  return {orGroups, excludes};
+}
+
+function scoreKeyword(blob, parsed) {
+  const {orGroups, excludes} = parsed;
+  for (const ex of excludes) if (blob.includes(ex)) return 0;
+  let best = 0;
+  for (const group of orGroups) {
+    if (!group.length) continue;
+    const matched = group.filter(t => blob.includes(t.value)).length;
+    const s = matched / group.length;
+    if (s > best) best = s;
+  }
+  return best;
+}
+
+function buildKeywordScores(term) {
+  const parsed = parseQuery(term);
+  simScores = new Map();
+  for (const n of ALL_NODES) {
+    simScores.set(String(n.id), scoreKeyword((n.search_blob||"").toLowerCase(), parsed));
+  }
+}
+
+// ── vis-network: created ONCE, physics runs once then freezes ─────────────────
+function initNetwork() {
+  const container = document.getElementById("mynetwork");
+  nodesDS = new vis.DataSet(ALL_NODES.map(n => ({...n, title: buildTooltip(n)})));
+  edgesDS = new vis.DataSet(ALL_EDGES.map(e => ({...e})));
+
+  network = new vis.Network(container, {nodes: nodesDS, edges: edgesDS}, {
+    autoResize: true,
+    physics: {
+      enabled: true,
+      stabilization: {
+        enabled:    true,
+        iterations: 500,
+        fit:        true,
+      },
+      barnesHut: {
+        gravitationalConstant: -8000,
+        centralGravity:        0.3,
+        springLength:          150,
+        springConstant:        0.04,
+        damping:               0.2,
+        avoidOverlap:          0.5,
+      },
+    },
+    interaction: {hover:true, tooltipDelay:100, navigationButtons:true, keyboard:true},
+    nodes: {font:{face:"IBM Plex Sans, sans-serif", color:"#1e293b"}},
+    edges: {selectionWidth:3, hoverWidth:2, smooth:{enabled:true, type:"dynamic"}},
+  });
+
+  // Show stabilisation overlay with progress
+  const overlay  = document.getElementById("stabOverlay");
+  const stabText = document.getElementById("stabText");
+  const stabBar  = document.getElementById("stabBarFill");
+  overlay.classList.remove("hidden");
+
+  network.on("stabilizationProgress", e => {
+    const pct = Math.round(e.iterations / e.total * 100);
+    stabText.textContent = `Laying out graph… ${pct}%`;
+    stabBar.style.width = pct + "%";
+  });
+
+  network.once("stabilizationIterationsDone", () => {
+    network.setOptions({physics: {enabled: false}});
+    network.fit({animation:{duration:500, easingFunction:"easeInOutQuad"}});
+    overlay.classList.add("hidden");
+    applyStyles();
+    updateSummary();
+  });
+
+  network.on("click", params => {
+    if (params.nodes && params.nodes.length) {
+      const node = nodeMap.get(String(params.nodes[0]));
+      if (node) showDetail(node);
+    } else {
+      resetDetail();
     }
+  });
+}
 
-    function showDictionaryGroupInfo(nodeId) {
-      const node = nodeMap.get(String(nodeId));
-      if (!node) return;
+function buildTooltip(n) {
+  if (n.node_type === "actionable")
+    return `<b>${esc(n.actionable)}</b><br><i>${esc(n.article_title)} (${esc(n.article_year)})</i>`;
+  return `<b>${esc(n.dictionary_group)}</b><br>${esc((n.phrases_from_dictionary||[]).slice(0,4).join("; "))}`;
+}
 
-      const phrases = Array.isArray(node.phrases_from_dictionary) ? node.phrases_from_dictionary : [];
-      const phrasesHtml = phrases.length
-        ? phrases.map(p => `<span class="mini-chip">${escapeHtml(p)}</span>`).join("")
-        : '<span class="muted">No phrases available.</span>';
+// ── style-only update (never recreates network) ────────────────────────────────
+function applyStyles() {
+  if (!nodesDS || !edgesDS) return;
+  const term      = committedSearch;
+  const hasSearch = term.length > 0;
+  const hasSel    = selectedGroups.size > 0;
+  const isKW      = searchMode === "keyword" || !embedReady;
 
-      document.getElementById("detailsInfo").innerHTML = `
-        <div class="info-title">${escapeHtml(node.label || node.id)}</div>
-        <div class="info-subtitle">Dictionary Group</div>
-        <div class="info-text">${escapeHtml(node.dictionary_group || "N/A")}</div>
-        <div class="info-subtitle">Phrases from the dictionary</div>
-        <div class="mini-chip-wrap">${phrasesHtml}</div>
-      `;
+  let searchMatchNodes = null;
+  if (hasSearch) {
+    searchMatchNodes = new Set();
+    for (const [id, score] of simScores) {
+      if (isKW ? score > 0 : score >= threshold) searchMatchNodes.add(id);
     }
-
-    function renderNetwork() {
-      const state = getVisibleState();
-      const visibleNodes = state.visibleNodes;
-      const visibleEdges = state.visibleEdges;
-      const searchState = state.searchState;
-
-      nodesDS = new vis.DataSet(visibleNodes);
-      edgesDS = new vis.DataSet(visibleEdges);
-
-      const container = document.getElementById("mynetwork");
-      const data = { nodes: nodesDS, edges: edgesDS };
-      const options = {
-        autoResize: true,
-        interaction: {
-          hover: true,
-          tooltipDelay: 120,
-          multiselect: false,
-          navigationButtons: true
-        },
-        physics: {
-          enabled: true,
-          stabilization: { iterations: 220, fit: true },
-          barnesHut: {
-            gravitationalConstant: -7000,
-            centralGravity: 0.18,
-            springLength: 160,
-            springConstant: 0.035,
-            damping: 0.18,
-            avoidOverlap: 0.25
-          }
-        },
-        edges: {
-          selectionWidth: 3,
-          hoverWidth: 2.2,
-          smooth: { enabled: true, type: "dynamic" },
-          font: {
-            size: 12,
-            align: "middle"
-          }
-        },
-        nodes: {
-          font: {
-            face: "Inter, system-ui, sans-serif",
-            size: 15
-          }
-        }
-      };
-
-      if (network) {
-        network.destroy();
-      }
-
-      network = new vis.Network(container, data, options);
-
-      network.once("stabilizationIterationsDone", function() {
-        network.fit({ animation: { duration: 450, easingFunction: "easeInOutQuad" } });
-      });
-
-      network.on("click", function(params) {
-        if (params.nodes && params.nodes.length) {
-          const nodeId = String(params.nodes[0]);
-          const node = nodeMap.get(nodeId);
-
-          if (!node) {
-            setDefaultInfo();
-            return;
-          }
-
-          if (node.node_type === "actionable") {
-            showActionableInfo(nodeId);
-          } else if (node.node_type === "dictionary_group") {
-            showDictionaryGroupInfo(nodeId);
-          } else {
-            setDefaultInfo();
-          }
-          return;
-        }
-
-        setDefaultInfo();
-      });
-
-      updateSummary(visibleNodes, visibleEdges, searchState);
+    const expanded = new Set(searchMatchNodes);
+    for (const id of searchMatchNodes) {
+      const n = nodeMap.get(id);
+      if (!n) continue;
+      if (n.node_type === "dictionary_group") { for (const a of (groupToActions.get(id)||[])) expanded.add(a); }
+      else { for (const g of (actionToGroups.get(id)||[])) expanded.add(g); }
     }
+    searchMatchNodes = expanded;
+  }
 
-    function updateSelectedGroupsUI() {
-      const chipsEl = document.getElementById("selectedGroupsChips");
-      const selected = Array.from(selectedGroups).sort((a, b) => {
-        const na = nodeMap.get(a)?.dictionary_group || "";
-        const nb = nodeMap.get(b)?.dictionary_group || "";
-        return na.localeCompare(nb);
-      });
+  let selMatchNodes = null;
+  if (hasSel) {
+    selMatchNodes = new Set(selectedGroups);
+    for (const g of selectedGroups) { for (const a of (groupToActions.get(g)||[])) selMatchNodes.add(a); }
+  }
 
-      document.getElementById("selectedGroupsStat").textContent = selected.length;
-      document.getElementById("selectedCountBadge").textContent = selected.length;
+  function isVisible(id) {
+    if (!hasSearch && !hasSel) return true;
+    return (!searchMatchNodes || searchMatchNodes.has(id)) && (!selMatchNodes || selMatchNodes.has(id));
+  }
+  function isDirect(id) {
+    if (!hasSearch) return false;
+    const s = simScores.get(id) || 0;
+    return isKW ? s > 0 : s >= threshold;
+  }
 
-      if (!selected.length) {
-        chipsEl.className = "chips-wrap empty-state";
-        chipsEl.textContent = "No dictionary groups selected";
-        return;
-      }
-
-      chipsEl.className = "chips-wrap";
-      chipsEl.innerHTML = selected
-        .map(id => `<span class="selected-chip">${escapeHtml(nodeMap.get(id)?.dictionary_group || id)}</span>`)
-        .join("");
+  nodesDS.update(ALL_NODES.map(n => {
+    const id = String(n.id);
+    const vis_ = isVisible(id);
+    const dir  = isDirect(id);
+    if (!vis_) return {id:n.id, opacity:0.08, borderWidth:n.borderWidth||1.5, size:n.size, color:n.color};
+    if (dir && hasSearch) {
+      const g = n.node_type === "dictionary_group";
+      return {id:n.id, opacity:1, size:n.size*1.35, borderWidth:5, color:{
+        background: g?"#6baed6":"#fb6a4a", border: g?"#1d4ed8":"#9a3412",
+        highlight: g?{background:"#93c5fd",border:"#1e40af"}:{background:"#fb923c",border:"#7c2d12"},
+        hover:     g?{background:"#93c5fd",border:"#1e40af"}:{background:"#fb923c",border:"#7c2d12"},
+      }};
     }
+    return {id:n.id, opacity:1, size:n.size, borderWidth:n.borderWidth||1.5, color:n.color};
+  }));
 
-    function renderGroupPanel() {
-      const listEl = document.getElementById("groupList");
-      const term = searchText.trim().toLowerCase();
-      const searchState = getSearchState(term);
+  edgesDS.update(ALL_EDGES.map(e => {
+    const f=String(e.from), t=String(e.to);
+    const vis_=(isVisible(f)&&isVisible(t));
+    const hi=((isDirect(f)||isDirect(t))&&hasSearch);
+    if (!vis_) return {id:e.id, color:{color:"#e2e8f0",opacity:.08}, width:.8};
+    if (hi)   return {id:e.id, color:{color:"#334155",highlight:"#0f172a",hover:"#0f172a",opacity:.9}, width:2.8};
+    return       {id:e.id, color:{color:"#94a3b8",highlight:"#64748b",hover:"#64748b",opacity:.55}, width:1.4};
+  }));
 
-      const visibleGroups = dictGroupIds.filter(id => {
-        if (!searchState) return true;
-        return searchState.visibleGroups.has(id);
-      });
+  updateSummary();
+}
 
-      listEl.innerHTML = "";
+// ── group panel ────────────────────────────────────────────────────────────────
+function renderGroupPanel() {
+  const el   = document.getElementById("groupList");
+  const term = committedSearch;
+  const isKW = searchMode === "keyword" || !embedReady;
 
-      if (!visibleGroups.length) {
-        listEl.innerHTML = `<div class="empty-state">No dictionary groups match the current filter.</div>`;
-      } else {
-        visibleGroups.forEach(id => {
-          const node = nodeMap.get(id);
-          const isMatched = searchState ? searchState.directMatchedGroups.has(id) : false;
-
-          const item = document.createElement("button");
-          item.className =
-            "group-item" +
-            (selectedGroups.has(id) ? " selected" : "") +
-            (isMatched ? " matched" : "");
-          item.type = "button";
-          item.textContent = node?.dictionary_group || id;
-          item.dataset.groupId = id;
-
-          item.addEventListener("click", () => {
-            if (selectedGroups.has(id)) {
-              selectedGroups.delete(id);
-            } else {
-              selectedGroups.add(id);
-            }
-            renderGroupPanel();
-            updateSelectedGroupsUI();
-            renderNetwork();
-          });
-
-          listEl.appendChild(item);
-        });
-      }
-
-      document.getElementById("shownGroupsLabel").textContent = `${visibleGroups.length} shown`;
-      document.getElementById("totalGroupsStat").textContent = dictGroupIds.length;
+  const visible = dictGroupIds.filter(id => {
+    if (!term) return true;
+    const s = simScores.get(id)||0;
+    if (isKW?s>0:s>=threshold) return true;
+    for (const a of (groupToActions.get(id)||[])) {
+      const as = simScores.get(a)||0;
+      if (isKW?as>0:as>=threshold) return true;
     }
+    return false;
+  });
 
-    function attachUIHandlers() {
-      document.getElementById("groupSearch").addEventListener("input", (e) => {
-        searchText = e.target.value || "";
-        renderGroupPanel();
-        renderNetwork();
-      });
+  document.getElementById("groupCountBadge").textContent = visible.length;
+  document.getElementById("statGroups").textContent   = dictGroupIds.length;
+  document.getElementById("statActions").textContent  = actionableIds.length;
+  document.getElementById("statSelected").textContent = selectedGroups.size;
 
-      document.getElementById("selectVisibleBtn").addEventListener("click", () => {
-        const term = searchText.trim().toLowerCase();
-        const searchState = getSearchState(term);
+  if (!visible.length) { el.innerHTML='<div class="empty-note">No groups match.</div>'; return; }
 
-        const visibleGroups = !searchState
-          ? dictGroupIds
-          : [...searchState.visibleGroups];
+  const sorted = term ? [...visible].sort((a,b)=>(simScores.get(b)||0)-(simScores.get(a)||0)) : visible;
+  el.innerHTML = sorted.map(id => {
+    const n = nodeMap.get(id);
+    const s = simScores.get(id)||0;
+    const scoreStr = (term && !isKW && s>0) ? (s*100).toFixed(0)+"%" : "";
+    const isSel = selectedGroups.has(id);
+    const isDir = term && (isKW?s>=1:s>=threshold);
+    return `<button class="group-item${isSel?" selected":""}${isDir?" matched":""}" onclick="toggleGroup('${id}')">
+      <span>${esc(n?.dictionary_group||id)}</span>
+      ${scoreStr?`<span class="sim-score">${scoreStr}</span>`:""}
+    </button>`;
+  }).join("");
+}
 
-        visibleGroups.forEach(id => selectedGroups.add(id));
-        renderGroupPanel();
-        updateSelectedGroupsUI();
-        renderNetwork();
-      });
+function toggleGroup(id) {
+  if (selectedGroups.has(id)) selectedGroups.delete(id); else selectedGroups.add(id);
+  document.getElementById("statSelected").textContent = selectedGroups.size;
+  applyStyles(); renderGroupPanel();
+}
+function selectVisible() {
+  const term=committedSearch, isKW=searchMode==="keyword"||!embedReady;
+  for (const id of dictGroupIds) {
+    const s=simScores.get(id)||0;
+    if (!term||(isKW?s>0:s>=threshold)) selectedGroups.add(id);
+  }
+  document.getElementById("statSelected").textContent=selectedGroups.size;
+  applyStyles(); renderGroupPanel();
+}
+function clearSelection() {
+  selectedGroups.clear();
+  document.getElementById("statSelected").textContent=0;
+  applyStyles(); renderGroupPanel(); resetDetail();
+}
 
-      document.getElementById("clearSelectionBtn").addEventListener("click", () => {
-        selectedGroups.clear();
-        renderGroupPanel();
-        updateSelectedGroupsUI();
-        renderNetwork();
-        setDefaultInfo();
-      });
+// ── detail panel ───────────────────────────────────────────────────────────────
+function showDetail(n) {
+  const el = document.getElementById("detailPanel");
+  el.classList.add("animating");
+  const score = simScores.get(String(n.id));
+  requestAnimationFrame(() => {
+    el.innerHTML = buildDetailHTML(n, score);
+    requestAnimationFrame(() => el.classList.remove("animating"));
+  });
+}
+function buildDetailHTML(n, score) {
+  const simBar = (score!=null && committedSearch && searchMode==="semantic" && embedReady)
+    ? `<div class="sim-bar-wrap"><div class="sim-bar-label">Semantic similarity</div>
+       <div class="sim-bar-track"><div class="sim-bar-fill" style="width:${(score*100).toFixed(1)}%"></div></div>
+       <div style="font-size:10px;color:var(--accent);margin-top:3px;font-family:'IBM Plex Mono',monospace">${(score*100).toFixed(1)}%</div></div>` : "";
+  if (n.node_type==="actionable") {
+    return `<div class="detail-title">${esc(n.label)} <span class="tag tag-a">actionable</span></div>
+      <div class="dlabel">Actionable finding</div><div class="dval">${esc(n.actionable)}</div>
+      <div class="dlabel">Evidence</div><div class="dval">${esc(n.evidence)}</div>
+      <div class="dlabel">Article</div><div class="dval">${esc(n.article_title)} (${esc(n.article_year)})</div>${simBar}`;
+  }
+  const phrases = n.phrases_from_dictionary||[];
+  const chips = phrases.length
+    ? `<div class="chip-wrap">${phrases.map(p=>`<span class="chip">${esc(p)}</span>`).join("")}</div>`
+    : '<span style="color:var(--muted)">No phrases.</span>';
+  return `<div class="detail-title">${esc(n.label)} <span class="tag tag-d">dict group</span></div>
+    <div class="dlabel">Dictionary group</div><div class="dval">${esc(n.dictionary_group)}</div>
+    <div class="dlabel">Phrases (${phrases.length})</div>${chips}${simBar}`;
+}
+function resetDetail() {
+  const el = document.getElementById("detailPanel");
+  el.classList.add("animating");
+  requestAnimationFrame(() => {
+    el.textContent = "Click any node to inspect details.";
+    requestAnimationFrame(() => el.classList.remove("animating"));
+  });
+}
 
-      document.getElementById("showAllBtn").addEventListener("click", () => {
-        selectedGroups.clear();
-        searchText = "";
-        document.getElementById("groupSearch").value = "";
-        renderGroupPanel();
-        updateSelectedGroupsUI();
-        renderNetwork();
-        setDefaultInfo();
-      });
-    }
+// ── controls ───────────────────────────────────────────────────────────────────
+// Search fires ONLY on Enter or Search button — never on every keystroke
+document.getElementById("searchBox").addEventListener("keydown", e => {
+  if (e.key === "Enter") commitSearch();
+});
+document.getElementById("searchBox").addEventListener("input", e => {
+  document.getElementById("searchClear").classList.toggle("visible", e.target.value.length > 0);
+});
+document.getElementById("searchClear").addEventListener("click", () => {
+  document.getElementById("searchBox").value = "";
+  document.getElementById("searchClear").classList.remove("visible");
+  committedSearch = "";
+  simScores = new Map();
+  applyStyles(); renderGroupPanel(); resetDetail();
+});
+document.getElementById("thresholdSlider").addEventListener("input", e => {
+  threshold = parseInt(e.target.value) / 100;
+  document.getElementById("thresholdVal").textContent = threshold.toFixed(2);
+  if (committedSearch) { applyStyles(); renderGroupPanel(); }
+});
 
-    function initialize() {
-      attachUIHandlers();
-      renderGroupPanel();
-      updateSelectedGroupsUI();
-      renderNetwork();
-      setDefaultInfo();
+function setSearchMode(mode) {
+  searchMode = mode;
+  document.getElementById("pillSemantic").classList.toggle("active", mode==="semantic");
+  document.getElementById("pillKeyword").classList.toggle("active",  mode==="keyword");
+  document.getElementById("thresholdRow").style.display = mode==="semantic"?"flex":"none";
+  document.getElementById("syntaxHint").classList.toggle("visible", mode==="keyword");
+  if (mode==="keyword") setModeBanner("keyword");
+  else if (embedReady) setModeBanner("semantic");
+  else if (lastActiveMode==="error") setModeBanner("error");
+  else setModeBanner("fallback");
+  if (committedSearch) runSearch();
+}
 
-      document.getElementById("statusBox").textContent =
-        `Loaded ${GRAPH_STATS.row_count} row(s), ${GRAPH_STATS.dictionary_group_count} dictionary group(s), ${GRAPH_STATS.actionable_count} actionable item(s), and ${GRAPH_STATS.edge_count} relationship(s).`;
-    }
+function fitView() { if(network) network.fit({animation:{duration:400,easingFunction:"easeInOutQuad"}}); }
+function showAll() {
+  document.getElementById("searchBox").value = "";
+  document.getElementById("searchClear").classList.remove("visible");
+  committedSearch = ""; selectedGroups.clear(); simScores = new Map();
+  applyStyles(); renderGroupPanel(); resetDetail(); fitView();
+}
 
-    initialize();
-  </script>
+// ── summary ────────────────────────────────────────────────────────────────────
+function updateSummary() {
+  const allE = edgesDS ? edgesDS.get() : ALL_EDGES;
+  const vEdges = allE.filter(e => (e.color?.opacity||1) > 0.2).length;
+  document.getElementById("netSummary").textContent =
+    `${dictGroupIds.length} groups · ${actionableIds.length} actionables · ${vEdges} edges visible`;
+  document.getElementById("statEdges").textContent = vEdges;
+}
+
+function esc(v) {
+  return String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;")
+         .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+// ── boot ───────────────────────────────────────────────────────────────────────
+(function boot() {
+  document.getElementById("scRows").textContent    = GRAPH_STATS.row_count;
+  document.getElementById("scGroups").textContent  = GRAPH_STATS.dictionary_group_count;
+  document.getElementById("scActions").textContent = GRAPH_STATS.actionable_count;
+  document.getElementById("scEdges").textContent   = GRAPH_STATS.edge_count;
+
+  initNetwork();          // start physics — overlay shows progress
+  renderGroupPanel();     // populate group list immediately
+
+  // Load semantic search in background — non-blocking
+  bootstrapEmbedder().catch(err => {
+    console.error("Embedder bootstrap:", err);
+    setAIPill("error", "Semantic search unavailable");
+    setModeBanner("error");
+  });
+})();
+</script>
 </body>
 </html>
 """
 
-    html_text = html_text.replace("__SOURCE_CSV__", source_csv_str)
-    html_text = html_text.replace("__NODES_JSON__", nodes_json)
-    html_text = html_text.replace("__EDGES_JSON__", edges_json)
-    html_text = html_text.replace("__STATS_JSON__", stats_json)
 
-    return html_text
+# ── generate_html ──────────────────────────────────────────────────────────────
+
+def generate_html(
+    nodes: List[dict],
+    edges: List[dict],
+    stats: dict,
+    node_ids: Optional[List[str]] = None,
+    embeddings_b64: Optional[List[str]] = None,
+) -> str:
+    if node_ids and embeddings_b64 and len(node_ids) == len(embeddings_b64):
+        baked = {nid: b64 for nid, b64 in zip(node_ids, embeddings_b64)}
+        baked_json = json.dumps(baked, ensure_ascii=False)
+        tqdm.write(f"  Baking {len(baked)} node embeddings into HTML.")
+    else:
+        baked_json = "null"
+        tqdm.write("  No embeddings baked — browser will use keyword search.")
+    return (
+        HTML_TEMPLATE
+        .replace("__NODES_JSON__",       json.dumps(nodes, ensure_ascii=False))
+        .replace("__EDGES_JSON__",       json.dumps(edges, ensure_ascii=False))
+        .replace("__STATS_JSON__",       json.dumps(stats, ensure_ascii=False))
+        .replace("__BAKED_EMBEDDINGS__", baked_json)
+    )
 
 
 def write_html(output_path: Path, html_text: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html_text, encoding="utf-8")
+    with tqdm(total=1, desc="  Writing HTML", unit="file") as bar:
+        output_path.write_text(html_text, encoding="utf-8")
+        bar.update(1)
 
+
+# ── main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate an interactive bipartite network HTML between actionables and dictionary groups."
+        description="Generate actionable network HTML with baked semantic embeddings."
     )
-    parser.add_argument(
-        "--input_csv",
-        type=Path,
-        default=DEFAULT_INPUT_CSV,
-        help=f"Path to the actionable findings CSV (default: {DEFAULT_INPUT_CSV})",
-    )
-    parser.add_argument(
-        "--output_html",
-        type=Path,
-        default=DEFAULT_OUTPUT_HTML,
-        help=f"Path to output HTML (default: {DEFAULT_OUTPUT_HTML})",
-    )
+    parser.add_argument("--input_csv",   type=Path, default=DEFAULT_INPUT_CSV)
+    parser.add_argument("--output_html", type=Path, default=DEFAULT_OUTPUT_HTML)
+    parser.add_argument("--skip-embed",  action="store_true",
+                        help="Skip embedding — keyword search only")
+    parser.add_argument("--workers",     type=int, default=1,
+                        help="Parallel workers for embedding (default 1; set to CPU count for speed)")
     args = parser.parse_args()
 
+    print(f"\n[1/5] Reading {args.input_csv}")
     rows = read_csv_rows(args.input_csv)
-    nodes, edges, stats = build_graph_payload(rows)
-    html_text = build_html(nodes, edges, stats, args.input_csv)
+    print(f"      {len(rows)} row(s) loaded")
+
+    print("\n[2/5] Building graph payload …")
+    nodes, edges, stats, node_ids, node_texts = build_graph_payload(rows)
+    print(f"      groups={stats['dictionary_group_count']}  "
+          f"actionables={stats['actionable_count']}  "
+          f"edges={stats['edge_count']}")
+
+    embeddings_b64 = None
+    if not args.skip_embed:
+        print(f"\n[3/5] Embedding {len(node_texts)} node texts "
+              f"(workers={args.workers}) …")
+        embeddings_b64 = embed_texts(node_texts, n_workers=args.workers)
+    else:
+        print("\n[3/5] Skipping embedding (--skip-embed).")
+
+    print("\n[4/5] Rendering HTML …")
+    with tqdm(total=1, desc="  Serialising", unit="step") as bar:
+        html_text = generate_html(nodes, edges, stats, node_ids, embeddings_b64)
+        bar.update(1)
+
+    print(f"\n[5/5] Writing {args.output_html}")
     write_html(args.output_html, html_text)
 
-    print("[DONE] Interactive HTML generated successfully.")
-    print(f"[INPUT]  CSV:  {args.input_csv}")
-    print(f"[OUTPUT] HTML: {args.output_html}")
-    print(
-        "[STATS] "
-        f"rows={stats['row_count']}, "
-        f"dictionary_groups={stats['dictionary_group_count']}, "
-        f"actionables={stats['actionable_count']}, "
-        f"edges={stats['edge_count']}"
-    )
-    print()
-    print("Open the HTML in a browser.")
-    print("If needed, serve locally with:")
-    print(f"  cd {args.output_html.parent}")
-    print("  python3 -m http.server 8000")
+    kb = len(html_text.encode()) // 1024
+    print(f"\n  Done!  {kb} KB → {args.output_html}")
+    if embeddings_b64:
+        print("  Semantic search: baked embeddings + Transformers.js query model (browser-cached after first load)")
+    else:
+        print("  Semantic search: disabled. Run without --skip-embed to enable.")
+    print("  Open the HTML directly in any browser — no server needed.")
 
 
 if __name__ == "__main__":
