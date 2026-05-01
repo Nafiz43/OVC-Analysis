@@ -210,7 +210,8 @@ def build_graph_payload(
     # collect texts for embedding
     all_ids_ordered:   List[str] = []
     all_texts_ordered: List[str] = []
-    nodes: List[dict] = []
+    nodes:     List[dict] = []   # vis-only properties — safe to pass to DataSet
+    node_meta: List[dict] = []   # application data — NEVER touches vis DataSet
 
     with tqdm(actionable_key_to_id.items(), desc="  Serialising actionables",
               unit="node", total=len(actionable_key_to_id)) as bar:
@@ -225,6 +226,7 @@ def build_graph_payload(
             ]).lower()
             all_ids_ordered.append(visid)
             all_texts_ordered.append(semantic_text)
+            # vis-only: only recognised vis-network properties
             nodes.append({
                 "id": visid,
                 "label": meta["short_label"],
@@ -237,13 +239,17 @@ def build_graph_payload(
                 "borderWidth": 1.5,
                 "font": {"color": "#1e293b", "size": 13, "face": "IBM Plex Sans, sans-serif"},
                 "shadow": True,
+            })
+            # application meta: stays in ALL_NODE_META, never enters vis DataSet
+            node_meta.append({
+                "id": visid,
                 "node_type": "actionable",
                 "actionable":    meta["actionable"],
                 "evidence":      meta["evidence"],
                 "article_title": meta["article_title"],
                 "article_year":  meta["article_year"],
-                "semantic_text": semantic_text,
                 "search_blob":   search_blob,
+                "semantic_text": semantic_text,
             })
 
     with tqdm(dict_group_to_id.items(), desc="  Serialising groups",
@@ -267,11 +273,14 @@ def build_graph_payload(
                 "borderWidth": 1.5,
                 "font": {"color": "#1e293b", "size": 13, "face": "IBM Plex Sans, sans-serif"},
                 "shadow": True,
+            })
+            node_meta.append({
+                "id": visid,
                 "node_type": "dictionary_group",
                 "dictionary_group": dg,
                 "phrases_from_dictionary": meta["phrases_from_dictionary"],
-                "semantic_text": semantic_text,
                 "search_blob":   search_blob,
+                "semantic_text": semantic_text,
             })
 
     stats = {
@@ -280,7 +289,8 @@ def build_graph_payload(
         "dictionary_group_count": len(dict_group_to_id),
         "edge_count":             len(edges),
     }
-    return nodes, edges, stats, all_ids_ordered, all_texts_ordered
+    return nodes, node_meta, edges, stats, all_ids_ordered, all_texts_ordered
+
 
 
 # ── embedding ──────────────────────────────────────────────────────────────────
@@ -729,20 +739,33 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <script>
 // ── injected data ──────────────────────────────────────────────────────────────
+// ALL_NODES: vis-only properties (id, label, shape, size, color, font, shadow).
+// NO application data here — nothing that vis-network could accidentally render.
 const ALL_NODES        = __NODES_JSON__;
+// ALL_NODE_META: application data (node_type, actionable, evidence, search_blob…).
+// Never passed to vis DataSet — only read by the detail panel and search.
+const ALL_NODE_META    = __NODE_META_JSON__;
 const ALL_EDGES        = __EDGES_JSON__;
 const GRAPH_STATS      = __STATS_JSON__;
 // {nodeId: base64_float32_384d} baked by Python, or null if --skip-embed used
 const BAKED_EMBEDDINGS = __BAKED_EMBEDDINGS__;
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Freeze source arrays — prevents accidental mutation bugs
+Object.freeze(ALL_NODES);
+Object.freeze(ALL_NODE_META);
+
 // ── lookup structures ──────────────────────────────────────────────────────────
-const nodeMap = new Map(ALL_NODES.map(n => [String(n.id), n]));
-const dictGroupIds = ALL_NODES
-  .filter(n => n.node_type === "dictionary_group")
-  .map(n => String(n.id))
+// nodeMap: keyed by id, values from ALL_NODE_META (the application data object).
+// This is what the detail panel and search read — never the vis DataSet.
+const nodeMap = new Map(ALL_NODE_META.map(m => [String(m.id), m]));
+const dictGroupIds = ALL_NODE_META
+  .filter(m => m.node_type === "dictionary_group")
+  .map(m => String(m.id))
   .sort((a,b) => (nodeMap.get(a)?.dictionary_group||"").localeCompare(nodeMap.get(b)?.dictionary_group||""));
-const actionableIds = ALL_NODES.filter(n => n.node_type === "actionable").map(n => String(n.id));
+const actionableIds = ALL_NODE_META
+  .filter(m => m.node_type === "actionable")
+  .map(m => String(m.id));
 
 const groupToActions = new Map(dictGroupIds.map(id => [id, new Set()]));
 const actionToGroups = new Map(actionableIds.map(id => [id, new Set()]));
@@ -954,16 +977,57 @@ function scoreKeyword(blob, parsed) {
 function buildKeywordScores(term) {
   const parsed = parseQuery(term);
   simScores = new Map();
-  for (const n of ALL_NODES) {
-    simScores.set(String(n.id), scoreKeyword((n.search_blob||"").toLowerCase(), parsed));
+  // iterate nodeMap (ALL_NODE_META) which has search_blob
+  for (const [id, m] of nodeMap) {
+    simScores.set(id, scoreKeyword((m.search_blob||"").toLowerCase(), parsed));
   }
 }
 
+// Returns plain text for the hover tooltip — no HTML tags, no attribute leakage.
+function buildTooltip(n) {
+  const m = nodeMap.get(String(n.id));
+  if (!m) return n.label || String(n.id);
+  if (m.node_type === "actionable")
+    return m.actionable + "\n" + m.article_title + " (" + m.article_year + ")";
+  const phrases = (m.phrases_from_dictionary || []).slice(0, 4).join("; ");
+  return m.dictionary_group + (phrases ? "\n" + phrases : "");
+}
+
 // ── vis-network: created ONCE, physics runs once then freezes ─────────────────
+
+// Strict whitelist — only these keys are ever allowed into the vis DataSet.
+// Anything not in this set is silently dropped at the last possible boundary.
+const VIS_NODE_KEYS = new Set([
+  "id","label","shape","size","color",
+  "borderWidth","font","shadow","opacity","title"
+]);
+
+function sanitizeVisNode(input) {
+  const out = {};
+  for (const k of VIS_NODE_KEYS) {
+    if (input[k] !== undefined) out[k] = input[k];
+  }
+  return out;
+}
+
+function visNode(n) {
+  const base = sanitizeVisNode(n);
+  return { ...base, opacity: 1, title: buildTooltip(n) };
+}
+
 function initNetwork() {
   const container = document.getElementById("mynetwork");
-  nodesDS = new vis.DataSet(ALL_NODES.map(n => ({...n, title: buildTooltip(n)})));
-  edgesDS = new vis.DataSet(ALL_EDGES.map(e => ({...e})));
+
+  // Step 3: explicit .map(n => visNode(n)) — ensures future edits can't bypass
+  nodesDS = new vis.DataSet(
+    ALL_NODES.map(n => visNode(n))
+  );
+  edgesDS = new vis.DataSet(ALL_EDGES.map(e => ({
+    id:    e.id,
+    from:  e.from,
+    to:    e.to,
+    width: e.width,
+  })));
 
   network = new vis.Network(container, {nodes: nodesDS, edges: edgesDS}, {
     autoResize: true,
@@ -1018,12 +1082,6 @@ function initNetwork() {
   });
 }
 
-function buildTooltip(n) {
-  if (n.node_type === "actionable")
-    return `<b>${esc(n.actionable)}</b><br><i>${esc(n.article_title)} (${esc(n.article_year)})</i>`;
-  return `<b>${esc(n.dictionary_group)}</b><br>${esc((n.phrases_from_dictionary||[]).slice(0,4).join("; "))}`;
-}
-
 // ── style-only update (never recreates network) ────────────────────────────────
 function applyStyles() {
   if (!nodesDS || !edgesDS) return;
@@ -1065,19 +1123,42 @@ function applyStyles() {
   }
 
   nodesDS.update(ALL_NODES.map(n => {
-    const id = String(n.id);
+    const id   = String(n.id);
+    const meta = nodeMap.get(id);
     const vis_ = isVisible(id);
     const dir  = isDirect(id);
-    if (!vis_) return {id:n.id, opacity:0.08, borderWidth:n.borderWidth||1.5, size:n.size, color:n.color};
+    // Every branch goes through sanitizeVisNode — nothing extra can sneak in
+    if (!vis_) return sanitizeVisNode({
+      id:          n.id,
+      opacity:     0.08,
+      borderWidth: n.borderWidth || 1.5,
+      size:        n.size,
+      color:       n.color,
+    });
     if (dir && hasSearch) {
-      const g = n.node_type === "dictionary_group";
-      return {id:n.id, opacity:1, size:n.size*1.35, borderWidth:5, color:{
-        background: g?"#6baed6":"#fb6a4a", border: g?"#1d4ed8":"#9a3412",
-        highlight: g?{background:"#93c5fd",border:"#1e40af"}:{background:"#fb923c",border:"#7c2d12"},
-        hover:     g?{background:"#93c5fd",border:"#1e40af"}:{background:"#fb923c",border:"#7c2d12"},
-      }};
+      const g = meta?.node_type === "dictionary_group";
+      return sanitizeVisNode({
+        id:          n.id,
+        opacity:     1,
+        size:        n.size * 1.35,
+        borderWidth: 5,
+        color: {
+          background: g ? "#6baed6" : "#fb6a4a",
+          border:     g ? "#1d4ed8" : "#9a3412",
+          highlight:  g ? {background:"#93c5fd",border:"#1e40af"}
+                        : {background:"#fb923c",border:"#7c2d12"},
+          hover:      g ? {background:"#93c5fd",border:"#1e40af"}
+                        : {background:"#fb923c",border:"#7c2d12"},
+        },
+      });
     }
-    return {id:n.id, opacity:1, size:n.size, borderWidth:n.borderWidth||1.5, color:n.color};
+    return sanitizeVisNode({
+      id:          n.id,
+      opacity:     1,
+      size:        n.size,
+      borderWidth: n.borderWidth || 1.5,
+      color:       n.color,
+    });
   }));
 
   edgesDS.update(ALL_EDGES.map(e => {
@@ -1183,7 +1264,8 @@ function resetDetail() {
   const el = document.getElementById("detailPanel");
   el.classList.add("animating");
   requestAnimationFrame(() => {
-    el.textContent = "Click any node to inspect details.";
+    // Use innerHTML (not textContent) so subsequent innerHTML writes render correctly
+    el.innerHTML = "Click any node to inspect details.";
     requestAnimationFrame(() => el.classList.remove("animating"));
   });
 }
@@ -1271,6 +1353,7 @@ function esc(v) {
 
 def generate_html(
     nodes: List[dict],
+    node_meta: List[dict],
     edges: List[dict],
     stats: dict,
     node_ids: Optional[List[str]] = None,
@@ -1285,9 +1368,10 @@ def generate_html(
         tqdm.write("  No embeddings baked — browser will use keyword search.")
     return (
         HTML_TEMPLATE
-        .replace("__NODES_JSON__",       json.dumps(nodes, ensure_ascii=False))
-        .replace("__EDGES_JSON__",       json.dumps(edges, ensure_ascii=False))
-        .replace("__STATS_JSON__",       json.dumps(stats, ensure_ascii=False))
+        .replace("__NODES_JSON__",       json.dumps(nodes,     ensure_ascii=False))
+        .replace("__NODE_META_JSON__",   json.dumps(node_meta, ensure_ascii=False))
+        .replace("__EDGES_JSON__",       json.dumps(edges,     ensure_ascii=False))
+        .replace("__STATS_JSON__",       json.dumps(stats,     ensure_ascii=False))
         .replace("__BAKED_EMBEDDINGS__", baked_json)
     )
 
@@ -1318,7 +1402,7 @@ def main() -> None:
     print(f"      {len(rows)} row(s) loaded")
 
     print("\n[2/5] Building graph payload …")
-    nodes, edges, stats, node_ids, node_texts = build_graph_payload(rows)
+    nodes, node_meta, edges, stats, node_ids, node_texts = build_graph_payload(rows)
     print(f"      groups={stats['dictionary_group_count']}  "
           f"actionables={stats['actionable_count']}  "
           f"edges={stats['edge_count']}")
@@ -1333,7 +1417,7 @@ def main() -> None:
 
     print("\n[4/5] Rendering HTML …")
     with tqdm(total=1, desc="  Serialising", unit="step") as bar:
-        html_text = generate_html(nodes, edges, stats, node_ids, embeddings_b64)
+        html_text = generate_html(nodes, node_meta, edges, stats, node_ids, embeddings_b64)
         bar.update(1)
 
     print(f"\n[5/5] Writing {args.output_html}")
