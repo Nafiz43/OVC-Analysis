@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ovarian Cancer Gene-Impact Network</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root{
+    --bg:#e9eef0;
+    --canvas:#f7fafb;
+    --panel:#ffffff;
+    --ink:#16242b;
+    --ink-soft:#586a71;
+    --ink-faint:#8a9aa0;
+    --line:#dbe4e7;
+    --line-soft:#eaf0f2;
+    --seed:#0f4c5c;
+    --t1:#2a8a99;
+    --t2:#4f939d;
+    --accent:#c75b3f;
+    --accent-soft:#f6e6e0;
+    --accent-ink:#9c3d26;
+    --shadow:0 1px 2px rgba(16,40,48,.04),0 8px 28px rgba(16,40,48,.08);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Inter",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex;flex-direction:column;height:100vh;overflow:hidden;
+  }
+
+  /* ---------- header ---------- */
+  header{
+    padding:18px 26px 14px;background:var(--panel);
+    border-bottom:1px solid var(--line);
+    display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px 28px;
+    flex:0 0 auto;
+  }
+  .title-block{flex:1 1 360px;min-width:280px;}
+  h1{
+    font-family:"Fraunces",serif;font-weight:600;
+    font-size:25px;line-height:1.05;margin:0 0 5px;letter-spacing:-.01em;
+  }
+  h1 .em{font-style:italic;color:var(--seed);}
+  .subtitle{
+    font-size:13px;line-height:1.45;color:var(--ink-soft);
+    margin:0;max-width:62ch;
+  }
+
+  /* ---------- legend + controls ---------- */
+  .meta{display:flex;flex-direction:column;gap:11px;align-items:flex-end;}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:flex-end;}
+  .legend-group{display:flex;align-items:center;gap:13px;}
+  .lg-item{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-soft);white-space:nowrap;}
+  .dot{width:13px;height:13px;border-radius:50%;flex:0 0 auto;}
+  .dot.seed{background:var(--seed);}
+  .dot.t1{background:var(--t1);}
+  .dot.t2{background:var(--t2);}
+  .lg-line{width:22px;height:0;flex:0 0 auto;}
+  .lg-line.solid{border-top:2.5px solid #8fa3a9;}
+  .lg-line.dash{border-top:2.5px dashed #8fa3a9;}
+
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--canvas);}
+  .seg button{
+    border:0;background:transparent;color:var(--ink-soft);
+    font-family:inherit;font-size:12px;font-weight:600;
+    padding:7px 13px;cursor:pointer;transition:.15s;
+  }
+  .seg button.active{background:var(--seed);color:#fff;}
+  .seg button:not(.active):hover{background:var(--line-soft);color:var(--ink);}
+  .search-wrap{position:relative;}
+  #search{
+    border:1px solid var(--line);border-radius:8px;background:var(--canvas);
+    font-family:inherit;font-size:12.5px;color:var(--ink);
+    padding:7px 11px 7px 30px;width:148px;transition:.15s;
+  }
+  #search:focus{outline:none;border-color:var(--t1);background:#fff;width:166px;}
+  .search-wrap svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--ink-faint);pointer-events:none;}
+  .btn{
+    border:1px solid var(--line);border-radius:8px;background:var(--canvas);
+    color:var(--ink-soft);font-family:inherit;font-size:12px;font-weight:600;
+    padding:7px 13px;cursor:pointer;transition:.15s;
+  }
+  .btn:hover{background:var(--line-soft);color:var(--ink);}
+
+  /* ---------- main ---------- */
+  main{flex:1 1 auto;display:flex;min-height:0;}
+  #graph{flex:1 1 auto;position:relative;background:var(--canvas);min-width:0;}
+  #graph .hint{
+    position:absolute;left:50%;bottom:16px;transform:translateX(-50%);
+    font-size:11.5px;color:var(--ink-faint);background:rgba(255,255,255,.82);
+    padding:5px 12px;border-radius:20px;border:1px solid var(--line);
+    pointer-events:none;backdrop-filter:blur(2px);
+  }
+
+  /* ---------- detail panel ---------- */
+  aside{
+    flex:0 0 384px;width:384px;background:var(--panel);
+    border-left:1px solid var(--line);overflow-y:auto;
+    padding:24px 24px 40px;
+  }
+  aside::-webkit-scrollbar{width:9px;}
+  aside::-webkit-scrollbar-thumb{background:#cdd9dc;border-radius:6px;border:2px solid var(--panel);}
+
+  .empty{color:var(--ink-soft);}
+  .empty .icon{
+    width:46px;height:46px;border-radius:12px;background:var(--line-soft);
+    display:flex;align-items:center;justify-content:center;color:var(--t1);margin-bottom:16px;
+  }
+  .empty h2{font-family:"Fraunces",serif;font-weight:500;font-size:19px;color:var(--ink);margin:0 0 8px;}
+  .empty p{font-size:13.5px;line-height:1.55;margin:0 0 14px;}
+  .empty ul{margin:0;padding-left:18px;font-size:13px;line-height:1.7;}
+  .empty li b{color:var(--ink);font-weight:600;}
+
+  /* node card */
+  .tier-badge{
+    display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.05em;padding:4px 10px;border-radius:20px;margin-bottom:14px;
+  }
+  .tier-badge .pip{width:9px;height:9px;border-radius:50%;}
+  .tier-badge.seed{background:#e3edee;color:var(--seed);}
+  .tier-badge.seed .pip{background:var(--seed);}
+  .tier-badge.t1{background:#e1f0f1;color:#1f6f7c;}
+  .tier-badge.t1 .pip{background:var(--t1);}
+  .tier-badge.t2{background:#eaf2f3;color:#3c757e;}
+  .tier-badge.t2 .pip{background:var(--t2);}
+
+  .gene-symbol{font-family:"Fraunces",serif;font-weight:600;font-size:32px;line-height:1;margin:0 0 3px;letter-spacing:-.01em;}
+  .gene-full{font-size:13.5px;color:var(--ink-soft);margin:0 0 18px;font-style:italic;}
+
+  .field{margin-bottom:15px;}
+  .field-label{
+    font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;
+    color:var(--t1);margin:0 0 4px;
+  }
+  .field-body{font-size:13.5px;line-height:1.55;color:var(--ink);margin:0;}
+  .stat-chip{
+    display:inline-block;background:var(--accent-soft);color:var(--accent-ink);
+    font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:7px;line-height:1.4;
+  }
+
+  .conn-block{margin-top:20px;border-top:1px solid var(--line);padding-top:16px;}
+  .conn-head{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-faint);margin:0 0 9px;}
+  .conn{
+    display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+    background:var(--canvas);border:1px solid var(--line);border-radius:9px;
+    padding:9px 11px;margin-bottom:7px;cursor:pointer;font-family:inherit;transition:.13s;
+  }
+  .conn:hover{border-color:var(--t1);background:#fff;transform:translateX(2px);}
+  .conn .arrow{color:var(--accent);font-weight:700;font-size:14px;flex:0 0 auto;}
+  .conn .partner{font-weight:600;font-size:13.5px;color:var(--ink);}
+  .conn .ctype{font-size:11px;color:var(--ink-soft);margin-left:auto;text-align:right;line-height:1.3;}
+
+  /* edge card */
+  .edge-flow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px;}
+  .edge-node{
+    font-family:"Fraunces",serif;font-weight:600;font-size:21px;color:#fff;
+    padding:7px 15px;border-radius:9px;cursor:pointer;transition:.13s;
+  }
+  .edge-node:hover{filter:brightness(1.08);}
+  .edge-node.seed{background:var(--seed);}
+  .edge-node.t1{background:var(--t1);}
+  .edge-node.t2{background:var(--t2);}
+  .edge-arrow{color:var(--accent);font-size:22px;font-weight:700;}
+  .edge-type-tag{
+    font-family:"IBM Plex Mono",monospace;font-size:11px;font-weight:500;
+    display:inline-block;padding:4px 10px;border-radius:6px;margin-bottom:16px;
+    border:1px solid;
+  }
+  .edge-type-tag.functional{background:#e8f2ee;color:#1f6b54;border-color:#c4e0d6;}
+  .edge-type-tag.associative{background:#f3eef8;color:#6b4e8a;border-color:#e0d4ec;}
+
+  .ev-head{
+    display:flex;align-items:baseline;justify-content:space-between;
+    margin:22px 0 11px;border-top:1px solid var(--line);padding-top:16px;
+  }
+  .ev-head h3{font-family:"Fraunces",serif;font-weight:500;font-size:16px;margin:0;color:var(--ink);}
+  .ev-count{font-size:11px;font-weight:600;color:var(--accent-ink);background:var(--accent-soft);padding:3px 9px;border-radius:20px;}
+
+  .ev-card{
+    border:1px solid var(--line);border-radius:11px;padding:13px 14px;margin-bottom:11px;
+    background:var(--canvas);position:relative;
+  }
+  .ev-card .ev-n{
+    position:absolute;top:13px;left:14px;font-family:"IBM Plex Mono",monospace;
+    font-size:11px;color:var(--ink-faint);
+  }
+  .ev-cite{font-size:13px;line-height:1.5;color:var(--ink);margin:0 0 9px 26px;}
+  .ev-cite .jrnl{font-style:italic;color:var(--ink-soft);}
+  .ev-cite .pmid{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink-soft);}
+  .ev-link{
+    display:inline-flex;align-items:center;gap:5px;margin-left:26px;
+    font-size:12px;font-weight:600;color:var(--accent);text-decoration:none;
+  }
+  .ev-link:hover{text-decoration:underline;}
+  .ev-link svg{width:12px;height:12px;}
+
+  .note{font-size:11.5px;line-height:1.5;color:var(--ink-faint);margin-top:18px;border-top:1px dashed var(--line);padding-top:12px;}
+
+  @media (max-width:900px){
+    main{flex-direction:column;}
+    aside{flex:0 0 auto;width:100%;border-left:0;border-top:1px solid var(--line);max-height:46vh;}
+    #graph{flex:1 1 280px;min-height:280px;}
+    .meta{align-items:flex-start;}
+    .legend,.controls{justify-content:flex-start;}
+    header{padding:14px 18px;}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-block">
+    <h1>Ovarian Cancer <span class="em">Gene-Impact</span> Network</h1>
+    <p class="subtitle">Directional gene&ndash;gene relationships across three tiers, every edge grounded in ovarian-specific literature. Select a gene for its profile; select a connection for the evidence behind it.</p>
+  </div>
+  <div class="meta">
+    <div class="legend">
+      <div class="legend-group">
+        <span class="lg-item"><span class="dot seed"></span>Seed&nbsp;(Tier&nbsp;0)</span>
+        <span class="lg-item"><span class="dot t1"></span>Tier&nbsp;1</span>
+        <span class="lg-item"><span class="dot t2"></span>Tier&nbsp;2</span>
+      </div>
+      <div class="legend-group">
+        <span class="lg-item"><span class="lg-line solid"></span>Functional</span>
+        <span class="lg-item"><span class="lg-line dash"></span>Associative</span>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="search-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="search" list="genelist" placeholder="Find gene&hellip;" autocomplete="off">
+        <datalist id="genelist"></datalist>
+      </div>
+      <div class="seg" id="layout-seg">
+        <button data-layout="force" class="active">Force</button>
+        <button data-layout="tiers">Tiers</button>
+      </div>
+      <button class="btn" id="fit-btn">Fit</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="graph">
+    <div class="hint">Click a node or an edge &middot; drag to reposition &middot; scroll to zoom</div>
+  </div>
+  <aside id="panel">
+    <div class="empty">
+      <div class="icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="17" r="2.5"/><path d="M8 7l8 .5M7.5 8l4 7M16 9l-3.5 6.5"/></svg>
+      </div>
+      <h2>Nothing selected yet</h2>
+      <p>This is a binary-style impact tree: each gene points to at most two genes it affects in ovarian cancer, expanded two tiers deep.</p>
+      <ul>
+        <li><b>Click a gene</b> to see its function, ovarian-cancer role, and every connection.</li>
+        <li><b>Click a connection</b> to read the direction, mechanism, and all cited sources.</li>
+        <li><b>Solid</b> edges are functionally demonstrated; <b>dashed</b> edges are statistical (mutual exclusivity, co-occurrence, co-amplification).</li>
+      </ul>
+    </div>
+  </aside>
+</main>
+
+<script>
+/* ============================ DATA ============================ */
+const GENES = {
+  TP53:{tier:0,full:"Tumour protein p53",role:"Guardian of the genome \u2014 enforces the G1/S checkpoint and triggers apoptosis in response to DNA damage.",ovarian:"Defines high-grade serous ovarian carcinoma (HGSOC); its near-universal loss removes checkpoint control and licenses widespread copy-number chaos.",stat:"Mutated in ~96% of HGSOC \u2013 the near-defining lesion"},
+  BRCA1:{tier:0,full:"Breast cancer type 1 susceptibility protein",role:"Core homologous-recombination (HR) repair factor for DNA double-strand breaks.",ovarian:"Germline or somatic loss produces HR deficiency, conferring platinum and PARP-inhibitor sensitivity.",stat:"Altered in ~20% of ovarian cancers (germline + somatic)"},
+  BRCA2:{tier:0,full:"Breast cancer type 2 susceptibility protein",role:"Loads and chaperones the RAD51 recombinase onto resected DNA during HR repair.",ovarian:"Loss drives HR deficiency and PARP-inhibitor synthetic lethality; reversion mutations restore resistance.",stat:"Altered in ~12% of high-grade serous tumours"},
+  PIK3CA:{tier:0,full:"PI3K catalytic subunit alpha (p110\u03b1)",role:"Catalytic engine of class-I PI3K, activating the AKT\u2013mTOR growth axis.",ovarian:"Amplified/mutated especially in clear-cell and endometrioid histologies; a central node of PI3K-pathway addiction.",stat:"Amplified in ~30% of primary ovarian cancers"},
+  KRAS:{tier:0,full:"KRAS proto-oncogene GTPase",role:"Membrane GTPase that switches on the RAS/RAF/MEK/ERK (MAPK) cascade.",ovarian:"A defining driver of low-grade serous and mucinous tumours, largely absent from high-grade serous disease.",stat:"Mutated in ~35% of low-grade serous carcinomas"},
+  ARID1A:{tier:0,full:"AT-rich interaction domain 1A (BAF250a)",role:"DNA-binding subunit of the SWI/SNF chromatin-remodelling complex.",ovarian:"A signature tumour suppressor of ovarian clear-cell and endometrioid carcinoma; essentially never lost in HGSOC.",stat:"Mutated in 46% of clear-cell carcinomas, 0% of HGSOC"},
+  CCNE1:{tier:0,full:"Cyclin E1",role:"Partners CDK2 to drive the G1\u2192S transition and DNA-replication firing.",ovarian:"Amplification marks an HR-proficient HGSOC subset that is resistant to platinum and mutually exclusive with BRCA loss.",stat:"Amplified in ~15\u201320% of HGSOC"},
+  MYC:{tier:0,full:"MYC proto-oncogene (c-Myc)",role:"Master transcription factor amplifying proliferation, metabolism and ribosome biogenesis.",ovarian:"One of the most frequently amplified oncogenes in HGSOC, sitting in the 8q24 amplicon.",stat:"Amplified/gained in ~30\u201340% of HGSOC"},
+  NF1:{tier:0,full:"Neurofibromin 1",role:"A RAS-GTPase-activating protein (RAS-GAP) that switches RAS off.",ovarian:"Loss sustains RAS-GTP and MAPK activity, substituting for KRAS/BRAF mutation in serous tumours.",stat:"Inactivated in ~12\u201322% of ovarian serous carcinomas"},
+  RB1:{tier:0,full:"RB transcriptional corepressor 1 (retinoblastoma)",role:"The G1/S gatekeeper that restrains E2F transcription factors.",ovarian:"Loss deregulates the cell cycle in HGSOC; combined with BRCA loss it paradoxically predicts long survival.",stat:"Deleted/inactivated in ~10\u201315% of HGSOC"},
+  PARP1:{tier:1,full:"Poly(ADP-ribose) polymerase 1",role:"Senses and repairs DNA single-strand breaks; central to base-excision repair.",ovarian:"The clinical synthetic-lethal target in HR-deficient (BRCA-mutated) ovarian cancer \u2014 the basis of PARP-inhibitor therapy.",stat:"PARP inhibitors approved for HR-deficient ovarian cancer"},
+  RAD51:{tier:1,full:"RAD51 recombinase",role:"Catalyses strand invasion during homologous-recombination repair.",ovarian:"Nuclear RAD51 focus formation is the functional read-out of HR proficiency and a biomarker of PARP-inhibitor response.",stat:"Loss of RAD51 foci marks HR-deficient tumours"},
+  AKT2:{tier:1,full:"AKT serine/threonine kinase 2",role:"A central effector kinase downstream of PI3K driving survival and growth.",ovarian:"Co-amplified with PIK3CA; relays PI3K signalling onward to mTOR and to the Hippo effector YAP.",stat:"Increased copy number in ~28% of ovarian carcinomas"},
+  YAP1:{tier:1,full:"Yes-associated protein 1",role:"Transcriptional co-activator and terminal effector of the Hippo pathway.",ovarian:"Promotes migration, metastasis and chemoresistance; regulated downstream of PI3K/AKT in serous tumours.",stat:"Drives migration and chemoresistance in serous OC"},
+  BRAF:{tier:1,full:"B-Raf proto-oncogene kinase",role:"A RAF-family kinase relaying RAS signals to MEK/ERK.",ovarian:"A mutually exclusive alternative to KRAS mutation in low-grade serous carcinoma.",stat:"Mutated in ~5\u201310% of low-grade serous carcinomas"},
+  EZH2:{tier:1,full:"Enhancer of zeste homolog 2",role:"Catalytic H3K27 methyltransferase of the Polycomb PRC2 complex; a transcriptional repressor.",ovarian:"ARID1A-mutant clear-cell tumours become dependent on EZH2, creating a synthetic-lethal drug target.",stat:"Synthetic-lethal target in ARID1A-mutant OCCC"},
+  CDK2:{tier:1,full:"Cyclin-dependent kinase 2",role:"The catalytic partner of cyclin E1, phosphorylating RB1 to launch S-phase.",ovarian:"CCNE1-amplified tumours depend on CDK2 for proliferation and collapsed-fork repair \u2014 a targetable vulnerability.",stat:"Key dependency of CCNE1-amplified ovarian cancer"},
+  BRD4:{tier:1,full:"Bromodomain-containing protein 4",role:"A BET-family chromatin reader that sustains transcription of growth genes.",ovarian:"Co-amplified with CCNE1 in a poor-prognosis HGSOC subset; a BET-inhibitor target.",stat:"Co-amplified with CCNE1 in ~8% of HGSOC"},
+  PVT1:{tier:1,full:"Plasmacytoma variant translocation 1 (lncRNA)",role:"A long non-coding RNA in the 8q24 amplicon that stabilises MYC protein.",ovarian:"Co-amplified with MYC; independently promotes proliferation, metastasis and chemoresistance.",stat:"Co-amplified with MYC; altered in ~43% of serous OC"},
+  PIK3IP1:{tier:2,full:"PI3K interacting protein 1",role:"A negative regulator that dampens PI3K signalling.",ovarian:"An ARID1A/EZH2 target gene; its EZH2-mediated repression sustains PI3K/AKT activity in ARID1A-mutant cells.",stat:"De-repressed by EZH2 inhibition in ARID1A-mutant OC"},
+  RAC1:{tier:2,full:"Rac family small GTPase 1",role:"A Rho-family GTPase orchestrating cytoskeletal remodelling and cell migration.",ovarian:"The downstream effector of the PIK3CA\u2192AKT\u2192YAP axis that executes ovarian cancer cell migration.",stat:"Terminal migration effector of the PI3K\u2013YAP axis"}
+};
+
+const EDGES = [
+  {from:"TP53",to:"CCNE1",cat:"associative",type:"Co-selection",
+   dir:"TP53 loss is permissive for CCNE1-amplification-driven proliferation",
+   mech:"Near-universal TP53 inactivation removes the G1/S checkpoint, permitting cyclin E1\u2013CDK2-driven premature S-phase entry and replication stress. The two lesions recur together across HGSOC cohorts.",
+   ev:[
+     {c:'Etemadmoghadam D, et al. <span class="jrnl">Synthetic lethality between CCNE1 amplification and loss of BRCA1.</span> PNAS 2013;110(48):19489\u201394.',p:"PMID 24218601",u:"https://pubmed.ncbi.nlm.nih.gov/24218601/"},
+     {c:'Clinical characteristics and outcomes of phase I cancer patients with CCNE1 amplification. <span class="jrnl">Sci Rep</span> 2022;12:8701 \u2014 concurrent mutant p53 with CCNE1 amplification.',p:"DOI 10.1038/s41598-022-12669-5",u:"https://www.nature.com/articles/s41598-022-12669-5"}
+   ]},
+  {from:"TP53",to:"NF1",cat:"associative",type:"Co-occurrence",
+   dir:"NF1 inactivation co-occurs with TP53 mutation in ovarian serous carcinoma",
+   mech:"NF1 loss activates RAS/MAPK while TP53 loss removes checkpoint control; every NF1-defective serous tumour examined also carried a TP53 mutation, implying cooperative selection.",
+   ev:[
+     {c:'Sangha N, et al. <span class="jrnl">NF1 defects are common in human ovarian serous carcinomas and co-occur with TP53 mutations.</span> Neoplasia 2008;10(12):1362\u201372.',p:"Neoplasia 2008",u:"https://repository.cshl.edu/id/eprint/27582/"},
+     {c:'Zhong F, et al. <span class="jrnl">Comprehensive genomic profiling of HGSOC identifies co-occurring Ras/Raf-pathway mutations with TP53.</span> Cancer Med 2019;8:3928\u201335.',p:"DOI 10.1002/cam4.2243",u:"https://onlinelibrary.wiley.com/doi/full/10.1002/cam4.2243"}
+   ]},
+  {from:"BRCA1",to:"CCNE1",cat:"functional",type:"Synthetic lethality / mutual exclusivity",
+   dir:"CCNE1 amplification is mutually exclusive with BRCA1 loss; CCNE1-amplified cells depend on intact BRCA1",
+   mech:"High-level CCNE1 amplification and BRCA1/2 mutation are essentially mutually exclusive. A genome-wide shRNA screen showed CCNE1-amplified ovarian cells are selectively dependent on BRCA1, defining a synthetic-lethal relationship.",
+   ev:[
+     {c:'Etemadmoghadam D, et al. <span class="jrnl">Synthetic lethality between CCNE1 amplification and loss of BRCA1.</span> PNAS 2013;110(48):19489\u201394.',p:"PMID 24218601",u:"https://pubmed.ncbi.nlm.nih.gov/24218601/"},
+     {c:'Kang EY, et al. <span class="jrnl">CCNE1 and survival of patients with tubo-ovarian high-grade serous carcinoma \u2014 an OTTA consortium study.</span> Cancer 2023 (n=3,029).',p:"DOI 10.1002/cncr.34582",u:"https://acsjournals.onlinelibrary.wiley.com/doi/full/10.1002/cncr.34582"}
+   ]},
+  {from:"BRCA1",to:"PARP1",cat:"functional",type:"Synthetic lethality",
+   dir:"BRCA1 deficiency creates a therapeutic dependency on PARP1",
+   mech:"BRCA1 loss disables HR repair of double-strand breaks; inhibiting PARP1 blocks single-strand-break repair, so unrepaired damage accumulates and selectively kills BRCA1-deficient ovarian cells.",
+   ev:[
+     {c:'<span class="jrnl">Development of Olaparib for BRCA-Deficient Recurrent Epithelial Ovarian Cancer.</span> Clin Cancer Res 2015;21(17):3829 \u2014 establishes the synthetic-lethal rationale and FDA approval.',p:"Clin Cancer Res 2015",u:"https://aacrjournals.org/clincancerres/article/21/17/3829/117516/"},
+     {c:'PARP inhibitors for BRCA1/2-mutated and sporadic ovarian cancer. <span class="jrnl">Br J Cancer</span> 2016.',p:"DOI 10.1038/bjc.2016.311",u:"https://www.nature.com/articles/bjc2016311"}
+   ]},
+  {from:"BRCA2",to:"RAD51",cat:"functional",type:"Functional dependency",
+   dir:"BRCA2 loads and chaperones RAD51 onto resected DNA during HR",
+   mech:"BRCA2 recruits the RAD51 recombinase to double-strand breaks. Loss abolishes damage-induced RAD51 foci, and re-expressing functional BRCA2 in ovarian cell lines restores RAD51 co-immunoprecipitation and foci.",
+   ev:[
+     {c:'Distinct roles of treatment schemes and BRCA2 on the restoration of HR repair and PARP-inhibitor resistance in ovarian cancer (PEO1 model; BRCA2\u2013RAD51 co-IP). <span class="jrnl">PMC9669252.</span>',p:"PMC9669252",u:"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9669252/"},
+     {c:'<span class="jrnl">Homologous recombination proficiency in ovarian and breast cancer patients.</span> BMC Cancer 2021 \u2014 BRCA2 signals RAD51 to DSB sites.',p:"DOI 10.1186/s12885-021-08863-9",u:"https://bmccancer.biomedcentral.com/articles/10.1186/s12885-021-08863-9"}
+   ]},
+  {from:"BRCA2",to:"PARP1",cat:"functional",type:"Synthetic lethality",
+   dir:"BRCA2 deficiency sensitises ovarian cancer to PARP inhibition",
+   mech:"HR deficiency from BRCA2 loss combined with PARP inhibition produces synthetic-lethal double-strand-break accumulation \u2014 the same axis as BRCA1, demonstrated in Brca2-deficient ovarian models.",
+   ev:[
+     {c:'<span class="jrnl">Targeting RAD52 overcomes PARP inhibitor resistance in a preclinical Brca2-deficient ovarian cancer model.</span> 2025 \u2014 Brca2-deficient ovarian models are PARPi-sensitive.',p:"PMC12485677",u:"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12485677/"},
+     {c:'<span class="jrnl">Development of Olaparib for BRCA-Deficient Recurrent Epithelial Ovarian Cancer.</span> Clin Cancer Res 2015;21(17):3829 (covers BRCA2).',p:"Clin Cancer Res 2015",u:"https://aacrjournals.org/clincancerres/article/21/17/3829/117516/"}
+   ]},
+  {from:"PIK3CA",to:"AKT2",cat:"functional",type:"Pathway activation",
+   dir:"PIK3CA amplification/overexpression drives AKT (incl. AKT2) activation",
+   mech:"PI3K p110\u03b1 amplification (~30% of ovarian cancers) activates the canonical AKT\u2192mTOR/S6K1 axis; PIK3CA, AKT1 and AKT2 show coordinated copy-number gain in primary ovarian tumours.",
+   ev:[
+     {c:'<span class="jrnl">Multiple Genetic Alterations within the PI3K Pathway Are Responsible for AKT Activation in Patients with Ovarian Carcinoma.</span> PLoS One 2013;8(2):e55362 \u2014 AKT2 copy gain in ~28% of cases.',p:"PMC3567053",u:"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3567053/"}
+   ]},
+  {from:"PIK3CA",to:"YAP1",cat:"functional",type:"Signalling crosstalk",
+   dir:"PIK3CA aberration activates AKT, which phosphorylates YAP1 at Ser127",
+   mech:"Both PIK3CA amplification and the E545K mutation activate AKT \u2192 YAP-Ser127 phosphorylation \u2192 cytoplasmic YAP retention \u2192 RAC1-mediated migration in serous ovarian cancer cells.",
+   ev:[
+     {c:'Zhang et al. <span class="jrnl">Vertical inhibition of p110\u03b1/AKT and N-cadherin enhances treatment efficacy in PIK3CA-aberrated ovarian cancer cells.</span> Mol Oncol 2025.',p:"DOI 10.1002/1878-0261.13761",u:"https://febs.onlinelibrary.wiley.com/doi/10.1002/1878-0261.13761"}
+   ]},
+  {from:"KRAS",to:"BRAF",cat:"associative",type:"Mutual exclusivity",
+   dir:"KRAS and BRAF mutations are mutually exclusive MAPK activators in low-grade serous carcinoma",
+   mech:"Either mutation independently activates RAS/RAF/MEK/ERK, so in low-grade serous and borderline tumours they never co-occur \u2014 each is sufficient on its own.",
+   ev:[
+     {c:'Singer G, et al. <span class="jrnl">Mutations in BRAF and KRAS characterize the development of low-grade ovarian serous carcinoma.</span> J Natl Cancer Inst 2003;95(6):484\u20136 \u2014 68% mutated, none with both.',p:"PMID 12644542",u:"https://pubmed.ncbi.nlm.nih.gov/12644542/"},
+     {c:'<span class="jrnl">Mutational analysis of KRAS, BRAF and TP53 in ovarian serous carcinomas of Korean women.</span> 2009 \u2014 KRAS/BRAF mutually exclusive.',p:"PMID 19430562",u:"https://pubmed.ncbi.nlm.nih.gov/19430562/"}
+   ]},
+  {from:"ARID1A",to:"PIK3CA",cat:"functional",type:"Cooperation / co-mutation",
+   dir:"ARID1A inactivation cooperates with PIK3CA activation to drive clear-cell carcinoma",
+   mech:"Concurrent ARID1A loss + PIK3CA(H1047R) produces penetrant ovarian clear-cell carcinoma in mice through sustained IL-6 inflammatory signalling. In human OCCC the two lesions frequently coexist; neither alone is sufficient.",
+   ev:[
+     {c:'Chandler RL, et al. <span class="jrnl">Coexistent ARID1A\u2013PIK3CA mutations promote ovarian clear-cell tumorigenesis through pro-tumorigenic inflammatory cytokine signalling.</span> Nat Commun 2015;6:6118.',p:"PMID 25625625",u:"https://www.nature.com/articles/ncomms7118"},
+     {c:'Yamamoto S, et al. <span class="jrnl">Loss of ARID1A protein expression occurs as an early event in OCCC and frequently coexists with PIK3CA mutations.</span> Mod Pathol 2012;25:615\u201324.',p:"PMID 22157930",u:"https://pubmed.ncbi.nlm.nih.gov/22157930/"}
+   ]},
+  {from:"ARID1A",to:"EZH2",cat:"functional",type:"Synthetic lethality",
+   dir:"ARID1A-mutated ovarian cells become dependent on EZH2",
+   mech:"ARID1A and EZH2 antagonistically regulate shared targets (notably PIK3IP1). ARID1A loss leaves EZH2-mediated repression unopposed, so EZH2 inhibition is synthetic-lethal in ARID1A-mutant clear-cell carcinoma, with tumour regression in vivo.",
+   ev:[
+     {c:'Bitler BG, et al. <span class="jrnl">Synthetic lethality by targeting EZH2 methyltransferase activity in ARID1A-mutated cancers.</span> Nat Med 2015;21(3):231\u20138.',p:"PMID 25686104",u:"https://www.nature.com/articles/nm.3799"}
+   ]},
+  {from:"CCNE1",to:"CDK2",cat:"functional",type:"Functional dependency",
+   dir:"CCNE1-amplified ovarian cancer depends on its partner kinase CDK2",
+   mech:"Cyclin E1 binds and activates CDK2 to drive S-phase entry; CDK2 also regulates homologous-recombination repair of collapsed replication forks in CCNE1-amplified cells, making it a targetable dependency.",
+   ev:[
+     {c:'<span class="jrnl">CDK2 regulates collapsed replication fork repair in CCNE1-amplified ovarian cancer cells via homologous recombination.</span> NAR Cancer 2023;5(3):zcad039.',p:"NAR Cancer 2023",u:"https://academic.oup.com/narcancer/article/5/3/zcad039/7232107"},
+     {c:'<span class="jrnl">The Cyclin D1/E1\u2013CDK2/4/6\u2013RB1 Pathway in Epithelial Ovarian Cancers.</span> Int J Mol Sci 2024;25(7):4060 \u2014 positive cyclin E1\u2013CDK2 correlation in TCGA.',p:"PMC11012085",u:"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11012085/"}
+   ]},
+  {from:"CCNE1",to:"BRD4",cat:"associative",type:"Co-amplification",
+   dir:"CCNE1 and BRD4 are co-amplified with correlated expression and worse survival",
+   mech:"Both map to regions amplified in HR-proficient HGSOC. Co-amplification (8% of HGSOC) confers poor outcome and platinum resistance, with positively correlated cyclin E1\u2013BRD4 protein levels.",
+   ev:[
+     {c:'<span class="jrnl">CCNE1 and BRD4 co-amplification in high-grade serous ovarian cancer is associated with poor clinical outcomes.</span> Gynecol Oncol 2020 \u2014 cyclin E\u2013BRD4 protein correlated; OS 39.9 vs 48.1 months.',p:"PMC7217738",u:"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7217738/"}
+   ]},
+  {from:"MYC",to:"PVT1",cat:"associative",type:"Co-amplification / co-dependency",
+   dir:"MYC and the lncRNA PVT1 (both at 8q24) are co-amplified and co-overexpressed",
+   mech:"8q24 amplification co-elevates MYC and PVT1; siRNA knockdown of either inhibits proliferation only in amplified ovarian lines, and PVT1 is the transcript most strongly co-expressed with MYC in TCGA ovarian (Pearson 0.70).",
+   ev:[
+     {c:'<span class="jrnl">Amplification of PVT1 contributes to the pathophysiology of ovarian and breast cancer.</span> Clin Cancer Res 2007;13(19):5745\u201355.',p:"PMID 17908964",u:"https://aacrjournals.org/clincancerres/article/13/19/5745/12987/"},
+     {c:'<span class="jrnl">PVT1 is a stress-responsive lncRNA that drives ovarian cancer metastasis and chemoresistance.</span> Life Sci Alliance 2022;5(11):e202201370.',p:"Life Sci Alliance 2022",u:"https://www.life-science-alliance.org/content/5/11/e202201370"}
+   ]},
+  {from:"NF1",to:"KRAS",cat:"associative",type:"Mutual exclusivity / substitution",
+   dir:"NF1 loss substitutes for KRAS mutation as a route to RAS/MAPK activation",
+   mech:"Neurofibromin is a RAS-GAP; its loss sustains RAS-GTP, so NF1-defective ovarian tumours activate MAPK without carrying KRAS mutations \u2014 the two are alternative routes to the same pathway.",
+   ev:[
+     {c:'Sangha N, et al. <span class="jrnl">NF1 defects are common in human ovarian serous carcinomas.</span> Neoplasia 2008;10(12):1362\u201372 \u2014 NF1-defective tumours lacked KRAS mutation but showed RAS-pathway activation.',p:"Neoplasia 2008",u:"https://repository.cshl.edu/id/eprint/27582/"}
+   ]},
+  {from:"NF1",to:"BRAF",cat:"associative",type:"Mutual exclusivity / substitution",
+   dir:"NF1 loss is an alternative route to MAPK activation, mutually exclusive with BRAF mutation",
+   mech:"NF1-defective ovarian tumours show RAS-GTP and phospho-MAPK activation but lack BRAF mutations, making NF1 loss and BRAF mutation alternative MAPK-activating events.",
+   ev:[
+     {c:'Sangha N, et al. <span class="jrnl">NF1 defects are common in human ovarian serous carcinomas.</span> Neoplasia 2008;10(12):1362\u201372.',p:"Neoplasia 2008",u:"https://repository.cshl.edu/id/eprint/27582/"},
+     {c:'<span class="jrnl">Survey of NF1 inactivation by surrogate immunohistochemistry in ovarian carcinomas.</span> Gynecol Oncol 2023 \u2014 NF1 inactivation sustains RAS-GTP / oncogenic MAPK.',p:"Gynecol Oncol 2023",u:"https://www.sciencedirect.com/science/article/pii/S0090825823014889"}
+   ]},
+  {from:"RB1",to:"CCNE1",cat:"associative",type:"Mutual exclusivity",
+   dir:"RB1 loss and CCNE1 amplification are inversely associated (functionally redundant)",
+   mech:"Both deregulate the RB\u2013E2F axis. RB1 loss and CCNE1 amplification each release E2F-driven proliferation, so having both confers no advantage \u2014 producing an inverse association in HGSOC.",
+   ev:[
+     {c:'Kang EY, et al. <span class="jrnl">CCNE1 and survival of patients with tubo-ovarian high-grade serous carcinoma \u2014 OTTA consortium study.</span> Cancer 2023 \u2014 CCNE1 amplification inversely associated with RB1 loss.',p:"DOI 10.1002/cncr.34582",u:"https://acsjournals.onlinelibrary.wiley.com/doi/full/10.1002/cncr.34582"},
+     {c:'<span class="jrnl">Cyclin E1 and RTK/RAS signaling drive CDK inhibitor resistance via E2F and ETS.</span> Oncotarget 2014 \u2014 CCNE1 gain and RB1 loss as alternative resistance mechanisms.',p:"PMC4359249",u:"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4359249/"}
+   ]},
+  {from:"RB1",to:"BRCA1",cat:"associative",type:"Co-occurrence",
+   dir:"RB1 loss co-occurs with BRCA1 deficiency and predicts long survival",
+   mech:"Concurrent RB1 loss + BRCA1 deficiency enhances platinum/PARPi sensitivity, interferon response and CD8+ infiltration; the combination predicts exceptionally long survival in HGSOC (median OS 9.3 vs 3.1 years).",
+   ev:[
+     {c:'<span class="jrnl">Concurrent RB1 Loss and BRCA Deficiency Predicts Enhanced Immunologic Response and Long-term Survival in Tubo-ovarian High-grade Serous Carcinoma.</span> Clin Cancer Res 2024;30(16):3481\u20133498 (OTTA, n=7,436).',p:"Clin Cancer Res 2024",u:"https://aacrjournals.org/clincancerres/article/30/16/3481/"}
+   ]},
+  {from:"RB1",to:"BRCA2",cat:"associative",type:"Co-occurrence",
+   dir:"RB1 loss co-occurs with BRCA2 deficiency and predicts long survival",
+   mech:"The same axis as RB1\u2013BRCA1: combined RB1 loss and BRCA2 deficiency enhances chemosensitivity and predicts exceptionally long survival in HGSOC.",
+   ev:[
+     {c:'<span class="jrnl">Concurrent RB1 Loss and BRCA Deficiency Predicts Enhanced Immunologic Response and Long-term Survival in Tubo-ovarian High-grade Serous Carcinoma.</span> Clin Cancer Res 2024;30(16):3481\u20133498.',p:"Clin Cancer Res 2024",u:"https://aacrjournals.org/clincancerres/article/30/16/3481/"}
+   ]},
+  {from:"EZH2",to:"PIK3IP1",cat:"functional",type:"Transcriptional repression",
+   dir:"EZH2 represses PIK3IP1 in ARID1A-mutant ovarian cells",
+   mech:"EZH2 (H3K27me3) and ARID1A antagonistically regulate PIK3IP1. In ARID1A-mutant cells EZH2 keeps PIK3IP1 silenced, sustaining PI3K/AKT signalling; EZH2 inhibition de-represses PIK3IP1 and drives the synthetic-lethal effect.",
+   ev:[
+     {c:'Bitler BG, et al. <span class="jrnl">Synthetic lethality by targeting EZH2 methyltransferase activity in ARID1A-mutated cancers.</span> Nat Med 2015;21(3):231\u20138 \u2014 PIK3IP1 identified as the shared ARID1A/EZH2 target.',p:"PMID 25686104",u:"https://www.nature.com/articles/nm.3799"}
+   ]},
+  {from:"PVT1",to:"MYC",cat:"functional",type:"Reciprocal stabilisation",
+   dir:"PVT1 stabilises MYC protein",
+   mech:"The PVT1 lncRNA stabilises MYC protein post-translationally; PVT1 knockdown reduces MYC in ovarian cancer cells, and the two reinforce each other from the shared 8q24 amplicon (a feedback loop with the MYC\u2192PVT1 edge).",
+   ev:[
+     {c:'Tseng YY, et al. <span class="jrnl">PVT1 dependence in cancer with MYC copy-number increase.</span> Nature 2014;512:82\u201386 \u2014 mechanism of PVT1\u2013MYC interdependence.',p:"DOI 10.1038/nature13311",u:"https://www.nature.com/articles/nature13311"},
+     {c:'<span class="jrnl">High amplification of PVT1 and MYC predict prognosis in early ovarian carcinoma</span> \u2014 PVT1-siRNA reduced MYC protein by Western blot in ovarian cells.',p:"Anticancer Res",u:"https://www.sciencedirect.com/science/article/pii/S0344033820320306"}
+   ]},
+  {from:"AKT2",to:"YAP1",cat:"functional",type:"Post-translational regulation",
+   dir:"AKT phosphorylates YAP1 at Ser127 in PIK3CA-aberrated ovarian cells",
+   mech:"Activated AKT phosphorylates YAP-Ser127, increasing cytoplasmic YAP and promoting RAC1-driven migration \u2014 the relay step of the PIK3CA\u2192YAP axis.",
+   ev:[
+     {c:'Zhang et al. <span class="jrnl">Vertical inhibition of p110\u03b1/AKT and N-cadherin enhances treatment efficacy in PIK3CA-aberrated ovarian cancer cells.</span> Mol Oncol 2025.',p:"DOI 10.1002/1878-0261.13761",u:"https://febs.onlinelibrary.wiley.com/doi/10.1002/1878-0261.13761"}
+   ]},
+  {from:"YAP1",to:"RAC1",cat:"functional",type:"Downstream activation",
+   dir:"Cytoplasmic YAP increases RAC1 activation to drive migration",
+   mech:"The PIK3CA\u2192AKT\u2192YAP-Ser127\u2192cytoplasmic-YAP axis converges on RAC1 activation, executing ovarian cancer cell migration.",
+   ev:[
+     {c:'Zhang et al. <span class="jrnl">Vertical inhibition of p110\u03b1/AKT and N-cadherin enhances treatment efficacy in PIK3CA-aberrated ovarian cancer cells.</span> Mol Oncol 2025.',p:"DOI 10.1002/1878-0261.13761",u:"https://febs.onlinelibrary.wiley.com/doi/10.1002/1878-0261.13761"}
+   ]},
+  {from:"CDK2",to:"RB1",cat:"functional",type:"Inhibitory phosphorylation",
+   dir:"Cyclin E1\u2013CDK2 phosphorylates RB1 to release E2F",
+   mech:"CDK2 (with cyclin E1) inactivates RB1 by phosphorylation, releasing E2F transcription factors and driving S-phase entry; aberrant activation increases double-strand-break formation in ovarian cancer cells.",
+   ev:[
+     {c:'<span class="jrnl">CDK2 regulates collapsed replication fork repair in CCNE1-amplified ovarian cancer cells via homologous recombination.</span> NAR Cancer 2023;5(3):zcad039 \u2014 cyclin E1\u2013CDK2 phosphorylates RB1 to release E2F.',p:"NAR Cancer 2023",u:"https://academic.oup.com/narcancer/article/5/3/zcad039/7232107"}
+   ]}
+];
+
+/* ============================ BUILD GRAPH ============================ */
+const TIER_COLOR = {0:getCSS('--seed'),1:getCSS('--t1'),2:getCSS('--t2')};
+const TIER_CLASS = {0:'seed',1:'t1',2:'t2'};
+const TIER_FONT  = {0:18,1:15,2:13};
+function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+
+const FADE_NODE_BG = '#e5ecee', FADE_NODE_BORDER='#d4dde0', FADE_FONT='#aab8bc';
+const FADE_EDGE = '#e0e8ea';
+const EDGE_BASE = '#aab9bd', EDGE_HI = getCSS('--accent');
+
+function baseNode(id){
+  const g = GENES[id];
+  return {
+    id, label:id, level:g.tier, shape:'circle',
+    color:{background:TIER_COLOR[g.tier],border:TIER_COLOR[g.tier],
+           highlight:{background:TIER_COLOR[g.tier],border:EDGE_HI},
+           hover:{background:TIER_COLOR[g.tier],border:EDGE_HI}},
+    font:{color:'#ffffff',size:TIER_FONT[g.tier],face:'Inter',vadjust:0,bold:{color:'#fff'}},
+    borderWidth:g.tier===0?3:1.5,
+    borderWidthSelected:3.5,
+    margin:9,
+    shadow:{enabled:true,size:6,x:0,y:2,color:'rgba(16,40,48,0.12)'}
+  };
+}
+function baseEdge(e,i){
+  return {
+    id:'e'+i, from:e.from, to:e.to,
+    arrows:{to:{enabled:true,scaleFactor:0.62}},
+    color:{color:EDGE_BASE,highlight:EDGE_HI,hover:EDGE_HI,opacity:0.95},
+    width:1.6, selectionWidth:1.8, hoverWidth:0.6,
+    dashes: e.cat==='associative' ? [6,5] : false,
+    smooth:{enabled:true,type:'dynamic',roundness:0.5}
+  };
+}
+
+const nodesDS = new vis.DataSet(Object.keys(GENES).map(baseNode));
+const edgesDS = new vis.DataSet(EDGES.map(baseEdge));
+
+const container = document.getElementById('graph');
+const baseOptions = {
+  autoResize:true,
+  interaction:{hover:true,tooltipDelay:99999,navigationButtons:false,zoomView:true,dragView:true},
+  physics:{
+    enabled:true, solver:'barnesHut',
+    barnesHut:{gravitationalConstant:-9500,centralGravity:0.32,springLength:135,springConstant:0.05,damping:0.5,avoidOverlap:0.55},
+    stabilization:{enabled:true,iterations:280,fit:true}
+  },
+  layout:{improvedLayout:true},
+  nodes:{},edges:{}
+};
+const network = new vis.Network(container, {nodes:nodesDS,edges:edgesDS}, baseOptions);
+
+network.once('stabilizationIterationsDone',()=>{ network.setOptions({physics:false}); network.fit({animation:{duration:500}}); });
+
+/* ============================ INTERACTION / HIGHLIGHT ============================ */
+function neighborsOf(nodeId){
+  const ns=new Set([nodeId]); const es=new Set();
+  EDGES.forEach((e,i)=>{ if(e.from===nodeId||e.to===nodeId){ns.add(e.from);ns.add(e.to);es.add('e'+i);} });
+  return {ns,es};
+}
+function dimAll(keepNodes,keepEdges){
+  nodesDS.update(Object.keys(GENES).map(id=>{
+    if(keepNodes.has(id)) return baseNode(id);
+    return {id,color:{background:FADE_NODE_BG,border:FADE_NODE_BORDER},
+            font:{color:FADE_FONT},borderWidth:1,shadow:{enabled:false}};
+  }));
+  edgesDS.update(EDGES.map((e,i)=>{
+    const on = keepEdges.has('e'+i);
+    return {id:'e'+i,
+      color:{color:on?EDGE_HI:FADE_EDGE,opacity:on?1:0.5},
+      width:on?2.6:1, shadow:false};
+  }));
+}
+function resetStyles(){
+  nodesDS.update(Object.keys(GENES).map(baseNode));
+  edgesDS.update(EDGES.map(baseEdge));
+}
+
+network.on('selectNode',p=>{ const id=p.nodes[0]; const {ns,es}=neighborsOf(id); dimAll(ns,es); showNode(id); });
+network.on('selectEdge',p=>{
+  if(p.nodes&&p.nodes.length) return; // edge click that also hit a node handled above
+  const eid=p.edges[0]; const idx=parseInt(eid.slice(1),10); const e=EDGES[idx];
+  dimAll(new Set([e.from,e.to]), new Set([eid])); showEdge(idx);
+});
+network.on('deselectNode',()=>{ if(network.getSelectedEdges().length===0){resetStyles();showEmpty();} });
+network.on('deselectEdge',()=>{ if(network.getSelectedNodes().length===0){resetStyles();showEmpty();} });
+network.on('click',p=>{ if(p.nodes.length===0&&p.edges.length===0){resetStyles();showEmpty();} });
+
+/* ============================ PANEL RENDERING ============================ */
+const panel = document.getElementById('panel');
+
+function showEmpty(){
+  panel.innerHTML = document.getElementById('empty-tpl').innerHTML;
+}
+
+function showNode(id){
+  const g=GENES[id]; const cls=TIER_CLASS[g.tier];
+  const tierLabel = g.tier===0?'Seed \u00b7 Tier 0':'Tier '+g.tier;
+  const out=EDGES.map((e,i)=>({e,i})).filter(o=>o.e.from===id);
+  const inc=EDGES.map((e,i)=>({e,i})).filter(o=>o.e.to===id);
+  const connHtml = (arr,outgoing)=>arr.map(o=>{
+    const partner = outgoing?o.e.to:o.e.from;
+    const pc=TIER_CLASS[GENES[partner].tier];
+    return `<button class="conn" data-edge="${o.i}">
+      <span class="arrow">${outgoing?'\u2192':'\u2190'}</span>
+      <span class="partner">${partner}</span>
+      <span class="ctype">${o.e.type}</span>
+    </button>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <span class="tier-badge ${cls}"><span class="pip"></span>${tierLabel}</span>
+    <h2 class="gene-symbol">${id}</h2>
+    <p class="gene-full">${g.full}</p>
+    <div class="field"><p class="field-label">Function</p><p class="field-body">${g.role}</p></div>
+    <div class="field"><p class="field-label">In ovarian cancer</p><p class="field-body">${g.ovarian}</p></div>
+    <div class="field"><span class="stat-chip">${g.stat}</span></div>
+    ${out.length?`<div class="conn-block"><p class="conn-head">Impacts (${out.length})</p>${connHtml(out,true)}</div>`:''}
+    ${inc.length?`<div class="conn-block"><p class="conn-head">Impacted by (${inc.length})</p>${connHtml(inc,false)}</div>`:''}
+  `;
+  panel.querySelectorAll('.conn').forEach(b=>b.addEventListener('click',()=>{
+    const idx=+b.dataset.edge;
+    network.setSelection({nodes:[],edges:['e'+idx]});
+    const e=EDGES[idx]; dimAll(new Set([e.from,e.to]),new Set(['e'+idx])); showEdge(idx);
+  }));
+  panel.scrollTop=0;
+}
+
+function showEdge(idx){
+  const e=EDGES[idx];
+  const fc=TIER_CLASS[GENES[e.from].tier], tc=TIER_CLASS[GENES[e.to].tier];
+  const evHtml = e.ev.map((x,i)=>`
+    <div class="ev-card">
+      <span class="ev-n">[${i+1}]</span>
+      <p class="ev-cite">${x.c}</p>
+      <a class="ev-link" href="${x.u}" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+        ${x.p} &middot; open source
+      </a>
+    </div>`).join('');
+
+  panel.innerHTML = `
+    <span class="tier-badge ${e.cat==='functional'?'t1':'t2'}" style="background:${e.cat==='functional'?'#e8f2ee':'#f3eef8'};color:${e.cat==='functional'?'#1f6b54':'#6b4e8a'}">
+      <span class="pip" style="background:${e.cat==='functional'?'#2c9c79':'#8a6db0'}"></span>${e.cat} edge
+    </span>
+    <div class="edge-flow">
+      <span class="edge-node ${fc}" data-node="${e.from}">${e.from}</span>
+      <span class="edge-arrow">\u2192</span>
+      <span class="edge-node ${tc}" data-node="${e.to}">${e.to}</span>
+    </div>
+    <span class="edge-type-tag ${e.cat}">${e.type}</span>
+    <div class="field"><p class="field-label">Direction</p><p class="field-body">${e.dir}</p></div>
+    <div class="field"><p class="field-label">Mechanism / observation</p><p class="field-body">${e.mech}</p></div>
+    <div class="ev-head"><h3>Supporting evidence</h3><span class="ev-count">${e.ev.length} source${e.ev.length>1?'s':''}</span></div>
+    ${evHtml}
+    <p class="note">Every cited study above reports this relationship in ovarian cancer specifically. ${e.cat==='associative'?'This is a statistical / associative edge \u2014 directionality is inferred from biology rather than a perturbation experiment.':'This is a functionally demonstrated edge \u2014 supported by perturbation or mechanistic experiments.'}</p>
+  `;
+  panel.querySelectorAll('.edge-node').forEach(n=>n.addEventListener('click',()=>{
+    const id=n.dataset.node; network.setSelection({nodes:[id],edges:[]});
+    const {ns,es}=neighborsOf(id); dimAll(ns,es); showNode(id); network.focus(id,{scale:1.1,animation:{duration:450}});
+  }));
+  panel.scrollTop=0;
+}
+
+/* template for empty state (clone current markup) */
+const emptyTpl=document.createElement('template');
+emptyTpl.id='empty-tpl';
+emptyTpl.innerHTML=panel.innerHTML;
+document.body.appendChild(emptyTpl);
+
+/* ============================ CONTROLS ============================ */
+// datalist
+const dl=document.getElementById('genelist');
+Object.keys(GENES).sort().forEach(id=>{const o=document.createElement('option');o.value=id;dl.appendChild(o);});
+
+document.getElementById('search').addEventListener('change',ev=>{
+  const v=ev.target.value.trim().toUpperCase();
+  if(GENES[v]){ network.setSelection({nodes:[v],edges:[]}); const {ns,es}=neighborsOf(v); dimAll(ns,es); showNode(v); network.focus(v,{scale:1.15,animation:{duration:500}}); }
+});
+
+document.getElementById('fit-btn').addEventListener('click',()=>{
+  network.setSelection({nodes:[],edges:[]}); resetStyles(); showEmpty();
+  network.fit({animation:{duration:550}});
+});
+
+// layout toggle
+const seg=document.getElementById('layout-seg');
+seg.addEventListener('click',ev=>{
+  const b=ev.target.closest('button'); if(!b)return;
+  seg.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  const mode=b.dataset.layout;
+  if(mode==='tiers'){
+    network.setOptions({
+      physics:false,
+      layout:{hierarchical:{enabled:true,direction:'LR',sortMethod:'directed',
+        levelSeparation:230,nodeSpacing:88,treeSpacing:120,blockShifting:true,edgeMinimization:true,parentCentralization:true}}
+    });
+  } else {
+    network.setOptions({layout:{hierarchical:{enabled:false}}});
+    nodesDS.update(Object.keys(GENES).map(id=>({id,fixed:false})));
+    network.setOptions({physics:{enabled:true}});
+    network.stabilize(260);
+    network.once('stabilizationIterationsDone',()=>network.setOptions({physics:false}));
+  }
+  setTimeout(()=>network.fit({animation:{duration:550}}),60);
+});
+
+// graceful failure if CDN blocked
+if(typeof vis==='undefined'){
+  document.getElementById('graph').innerHTML='<div style="padding:40px;font-family:Inter,sans-serif;color:#586a71">The network library could not load. Please open this file with an internet connection (it fetches vis-network from a CDN).</div>';
+}
+</script>
+</body>
+</html>
