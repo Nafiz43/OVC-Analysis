@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Research Plan &mdash; Modeling Ovarian Cancer Survival from Gene-Set Strategies</title>
+<title>Research Plan v2 &mdash; Knowledge, Popularity, or Circularity in Ovarian Cancer Survival</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -176,6 +176,40 @@
     .card:hover{transform:none;box-shadow:none;}
     section{break-inside:avoid;}
   }
+
+  /* ---------- v2 additions ---------- */
+  .hyps{display:flex;flex-direction:column;gap:12px;margin-top:6px;}
+  .hyp{border:1px solid var(--line);border-radius:14px;padding:18px 20px;display:grid;grid-template-columns:54px 1fr;gap:4px 14px;}
+  .hyp .h-id{grid-row:span 3;font-family:"Fraunces",serif;font-size:26px;font-weight:600;color:var(--seed);line-height:1;}
+  .hyp h3{font-family:"Fraunces",serif;font-weight:600;font-size:17px;margin:0;line-height:1.25;}
+  .hyp p{font-size:13.5px;color:var(--ink-soft);margin:4px 0 0;line-height:1.5;}
+  .hyp .new{font-size:13px;color:var(--accent-ink);background:var(--accent-soft);border-radius:8px;padding:7px 10px;margin-top:8px;}
+  .hyp .new b{color:var(--accent-ink);}
+  .hyp.core{border-color:#bcd6da;background:linear-gradient(0deg,var(--paper),#f5fafa);}
+  .badge{font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;background:var(--seed);color:#fff;border-radius:5px;padding:2px 7px;margin-left:8px;vertical-align:2px;}
+  .cards.c4{grid-template-columns:repeat(2,1fr);}
+  .card.s4::before{background:var(--ink-faint);}
+  .card.s4 .c-src{color:var(--ink-soft);}
+  .split.s3{grid-template-columns:repeat(3,1fr);}
+  table.lit{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:6px;}
+  table.lit th{font-family:"IBM Plex Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-faint);text-align:left;font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);}
+  table.lit td{padding:10px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink-soft);}
+  table.lit td:first-child{color:var(--ink);font-weight:600;white-space:nowrap;}
+  .steps{counter-reset:s;list-style:none;margin:6px 0 0;padding:0;}
+  .steps li{counter-increment:s;display:flex;gap:13px;padding:12px 0;border-top:1px solid var(--line-soft);font-size:14.5px;}
+  .steps li:first-child{border-top:0;}
+  .steps li::before{content:counter(s,decimal-leading-zero);flex:0 0 auto;font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:12px;color:var(--accent);padding-top:2px;}
+  .steps li span{color:var(--ink-soft);}
+  .refs{font-size:12.5px;color:var(--ink-soft);padding-left:18px;margin:0;}
+  .refs li{margin-bottom:6px;}
+  @media (max-width:760px){
+    .cards.c4,.split.s3{grid-template-columns:1fr;}
+    table.lit{display:block;overflow-x:auto;font-size:12.5px;}
+    table.lit td:first-child{white-space:normal;}
+    .figure{overflow-x:auto;}
+    .hyp{grid-template-columns:1fr;}
+    .hyp .h-id{grid-row:auto;}
+  }
 </style>
 </head>
 <body>
@@ -183,180 +217,285 @@
 
   <!-- HERO -->
   <header class="hero">
-    <p class="eyebrow">Research Plan &middot; Ovarian Cancer Genomics</p>
-    <h1>Modeling <span class="em">survival</span> from gene-set strategies</h1>
-    <p class="thesis">Do literature-structured, clustering-derived, or frequency-based gene sets best predict how ovarian cancer patients survive? We hold the cohort and pipeline fixed and let the gene panels compete.</p>
+    <p class="eyebrow">Research Plan v2 &middot; Ovarian Cancer Genomics</p>
+    <h1>Knowledge, <span class="em">popularity</span>, or circularity?</h1>
+    <p class="thesis">Does published ovarian cancer biology predict patient survival better than chance, better than gene popularity, and after removing knowledge that was itself learned from the test cohort? We answer this inside TCGA-OV alone, with no external validation cohort.</p>
     <div class="glance">
-      <div><div class="num">3</div><div class="lbl">Gene-set strategies</div></div>
-      <div><div class="num">2</div><div class="lbl">Survival outcomes</div></div>
-      <div><div class="num">1</div><div class="lbl">Shared cohort &amp; pipeline</div></div>
+      <div><div class="num">5</div><div class="lbl">Hypotheses</div></div>
+      <div><div class="num">3</div><div class="lbl">Outcomes</div></div>
+      <div><div class="num">1</div><div class="lbl">Cohort (TCGA-OV)</div></div>
+      <div><div class="num">0</div><div class="lbl">External cohorts needed</div></div>
     </div>
+    <div class="meta"><span><b>Supersedes</b> v1, the three-panel leaderboard</span><span><b>Status</b> design, before any modeling</span><span><b>Updated</b> October 19, 2026</span></div>
   </header>
 
-  <!-- 01 CONTEXT -->
+  <!-- 01 WHY V2 -->
   <section>
-    <div class="sec-head"><span class="sec-num">01</span><h2>Context</h2></div>
-    <p class="lead">Starting from a curated seed set of ovarian cancer driver genes, we traced documented gene&ndash;gene relationships outward into Tier&nbsp;1 and Tier&nbsp;2 using the published literature. Building that impact network surfaced something unexpected.</p>
-    <p>The literature describes <strong>relatively few direct gene&ndash;gene relationships</strong> in ovarian cancer &mdash; far fewer than the <strong>2,175 actionable findings</strong> we previously extracted from the same corpus. There is a real gap between what gets formally reported as a <em>relationship</em> and what sits inside individual <em>findings</em>. That gap raises the practical question this study answers: when the structure is this sparse, which way of assembling a gene panel actually carries predictive signal for patient outcome?</p>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Why the plan changed</h2></div>
+    <p class="lead">Starting from a seed set of 65 good-prognosis genes, we traced documented gene&ndash;gene relationships into Tier&nbsp;1 and Tier&nbsp;2. The literature turned out to report <strong>few explicit relationships</strong> but <strong>2,175 actionable findings</strong>. Version 1 asked which of three gene panels predicts survival best. That design has two problems.</p>
+    <p><strong>Random genes already predict survival.</strong> In breast cancer, 60% of published signatures did no better than random gene sets of the same size (Venet 2011). In late-stage ovarian cancer, only 8 of 14 published models beat random signatures, and the best reached a validation C-index of only about 0.56 to 0.60 (Waldron 2014). A ranking of three panels with no null distribution cannot show that any of them carries real biology.</p>
+    <p><strong>The literature may have already seen the test set.</strong> Hundreds of ovarian signature papers were built on TCGA-OV. When genes from those papers are scored on TCGA-OV, the result is partly circular, and an external cohort would not have fixed that. Version 2 makes this circularity something we measure, and uses it as the validation axis that replaces external data.</p>
     <div class="links">
       <a class="link-btn" href="https://nafiz43.github.io/OVC-Analysis/ovarian_gene_impact_network.html" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="7" r="2.2"/><circle cx="12" cy="17" r="2.2"/><path d="M8 7l8 .5M7.5 8l4 7M16 9l-3.5 6.5"/></svg>
         Gene-impact network
       </a>
       <a class="link-btn" href="https://nafiz43.github.io/OVC-Analysis/" target="_blank" rel="noopener">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h18v18H3z" opacity=".0"/><path d="M4 19V9m5 10V5m5 14v-7m5 7V8"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V9m5 10V5m5 14v-7m5 7V8"/></svg>
         2,175 actionables dashboard
       </a>
     </div>
   </section>
 
-  <!-- 02 QUESTION + SIGNATURE -->
+  <!-- 02 PRIOR WORK -->
   <section>
-    <div class="sec-head"><span class="sec-num">02</span><h2>The question, drawn out</h2></div>
-    <p>Three candidate gene panels enter the same modeling pipeline; two survival outcomes come out. The only thing that changes between runs is <strong>how the gene set was built</strong> &mdash; so any difference in performance is a difference in the panels themselves.</p>
-    <div class="figure">
-      <svg viewBox="0 0 920 300" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
-        <!-- input connectors -->
-        <path d="M222 60 C 300 60, 320 150, 392 150" fill="none" stroke="#0f4c5c" stroke-width="2.2" opacity=".55"/>
-        <path d="M222 150 C 300 150, 320 150, 392 150" fill="none" stroke="#2a8a99" stroke-width="2.2" opacity=".55"/>
-        <path d="M222 240 C 300 240, 320 150, 392 150" fill="none" stroke="#c75b3f" stroke-width="2.2" opacity=".55"/>
-        <!-- output connectors -->
-        <path d="M562 150 C 640 150, 660 120, 698 120" fill="none" stroke="#54666d" stroke-width="2.2" opacity=".5"/>
-        <path d="M562 150 C 640 150, 660 206, 698 206" fill="none" stroke="#54666d" stroke-width="2.2" opacity=".5"/>
+    <div class="sec-head"><span class="sec-num">02</span><h2>What prior work tells us</h2></div>
+    <table class="lit">
+      <thead><tr><th>Study</th><th>Finding</th><th>Consequence for us</th></tr></thead>
+      <tbody>
+        <tr><td>Venet 2011</td><td>Most random gene sets of more than 100 genes are significant predictors of breast cancer outcome; proliferation explains it.</td><td>Every panel must be compared against a null distribution, not only against other panels.</td></tr>
+        <tr><td>Waldron 2014</td><td>Of 14 ovarian prognostic models, 8 beat random. Top models reach C &asymp; 0.56&ndash;0.60 and share an immune axis.</td><td>Expect small effects. Adjust for the immune axis before claiming new signal.</td></tr>
+        <tr><td>Shimoni 2018</td><td>Random gene sets are biased toward predicting survival in 24 of 34 TCGA datasets; unsupervised subclustering reduced the bias in some datasets.</td><td>Population structure, not biology, can drive the clustering arm.</td></tr>
+        <tr><td>Stoeger 2018</td><td>Research attention to a gene is predicted by generic gene properties, not disease importance.</td><td>Frequency in the literature is a confound, not a neutral baseline.</td></tr>
+        <tr><td>Millstein 2020</td><td>OTTA-SPOT, 101 genes, HR 2.35 per SD in a very large HGSOC consortium.</td><td>Use it as a reference ceiling for what an expression panel can reach.</td></tr>
+        <tr><td>LLM-guided selection (2024&ndash;26)</td><td>LLM- or literature-chosen gene sets come close to data-driven sets but do not consistently beat them. Provenance of the knowledge is never checked.</td><td>This is the gap our study fills.</td></tr>
+        <tr><td>Time-sliced KGs</td><td>Knowledge-graph link prediction is validated by training on knowledge before year X and testing after.</td><td>The idea has not been used to stand in for external validation of a prognostic model.</td></tr>
+      </tbody>
+    </table>
+  </section>
 
-        <!-- left input pills -->
-        <g>
-          <rect x="32" y="33" width="190" height="54" rx="12" fill="#ffffff" stroke="#0f4c5c" stroke-width="1.6"/>
-          <text x="50" y="56" font-family="IBM Plex Mono, monospace" font-size="11" font-weight="600" fill="#0f4c5c">01 · LITERATURE</text>
-          <text x="50" y="74" font-size="13" fill="#16242b">Seed &#8594; Tier 1 &#8594; Tier 2</text>
-        </g>
-        <g>
-          <rect x="32" y="123" width="190" height="54" rx="12" fill="#ffffff" stroke="#2a8a99" stroke-width="1.6"/>
-          <text x="50" y="146" font-family="IBM Plex Mono, monospace" font-size="11" font-weight="600" fill="#2a8a99">02 · CLUSTERING</text>
-          <text x="50" y="164" font-size="13" fill="#16242b">Unsupervised gene set</text>
-        </g>
-        <g>
-          <rect x="32" y="213" width="190" height="54" rx="12" fill="#ffffff" stroke="#c75b3f" stroke-width="1.6"/>
-          <text x="50" y="236" font-family="IBM Plex Mono, monospace" font-size="11" font-weight="600" fill="#c75b3f">03 · FREQUENCY</text>
-          <text x="50" y="254" font-size="13" fill="#16242b">Most-cited genes</text>
-        </g>
-
-        <!-- model box -->
-        <rect x="392" y="106" width="170" height="88" rx="14" fill="#0f4c5c"/>
-        <text x="477" y="144" text-anchor="middle" font-family="Fraunces, serif" font-size="17" font-weight="600" fill="#ffffff">Survival</text>
-        <text x="477" y="166" text-anchor="middle" font-family="Fraunces, serif" font-size="17" font-weight="600" fill="#ffffff">model</text>
-
-        <!-- output pills -->
-        <g>
-          <rect x="698" y="92" width="200" height="56" rx="12" fill="#e3f0f1" stroke="#2a8a99" stroke-width="1.4"/>
-          <text x="716" y="116" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#2a8a99">BINARY</text>
-          <text x="716" y="134" font-size="13.5" fill="#16242b">Survivability</text>
-        </g>
-        <g>
-          <rect x="698" y="178" width="200" height="56" rx="12" fill="#f7e7e1" stroke="#c75b3f" stroke-width="1.4"/>
-          <text x="716" y="202" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#c75b3f">CONTINUOUS</text>
-          <text x="716" y="220" font-size="13.5" fill="#16242b">Months survived</text>
-        </g>
-      </svg>
-      <p class="fig-cap">Same cohort, three gene panels, two outcomes &mdash; compared head to head.</p>
+  <!-- 03 HYPOTHESES -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>Central hypothesis &amp; five sub-hypotheses</h2></div>
+    <p class="lead"><strong>Central hypothesis.</strong> Literature-curated genes carry prognostic signal in ovarian cancer beyond chance only after three artifacts are removed: the baseline prognostic signal that random genes show in TCGA-OV, gene popularity and the expression properties tied to it, and knowledge that was derived from TCGA-OV itself. What remains should come from pre-TCGA, cohort-independent literature, and should be strongest close to the seed genes in the network.</p>
+    <div class="hyps">
+      <div class="hyp core">
+        <div class="h-id">H1</div>
+        <h3>Matched-null calibration<span class="badge">core</span></h3>
+        <p>Every panel is scored against 1,000+ gene sets matched on size, mean expression, variance, co-expression connectivity, and publication count. A panel counts as informative only if it beats this matched null.</p>
+        <p class="new"><b>New:</b> earlier work used uniformly random genes. The matched null asks whether it matters <em>which</em> genes the literature picked, beyond what <em>kind</em> of genes they are.</p>
+      </div>
+      <div class="hyp">
+        <div class="h-id">H2</div>
+        <h3>Popularity confound</h3>
+        <p>The frequency panel&rsquo;s apparent signal is explained by popularity-linked properties: proliferation (meta-PCNA), immune and stromal content (ESTIMATE), and expression variance. Tested with popularity-matched nulls and by adjusting for those axes.</p>
+        <p class="new"><b>New:</b> the attention-bias finding has not been tested as a confound of prognostic gene panels.</p>
+      </div>
+      <div class="hyp core">
+        <div class="h-id">H3</div>
+        <h3>Provenance-held-out literature<span class="badge">core</span></h3>
+        <p>Our existing LLM pipeline tags each article with its publication date and whether it used TCGA data. Each literature panel is then rebuilt three ways: <strong>pre-2011</strong> articles (before the TCGA-OV landmark paper), <strong>post-2011 TCGA-independent</strong> articles, and <strong>TCGA-derived</strong> articles. We predict TCGA-derived panels look strongest and lose their advantage over matched nulls once circularity is accounted for. The pre-TCGA panel is an out-of-sample test of prior knowledge.</p>
+        <p class="new"><b>New:</b> validation moves from &ldquo;new patients&rdquo; to &ldquo;knowledge the cohort could not have shaped.&rdquo; This is how the study works without an external cohort.</p>
+      </div>
+      <div class="hyp">
+        <div class="h-id">H4</div>
+        <h3>Knowledge-distance gradient</h3>
+        <p>Signal above the matched null falls from seed to Tier&nbsp;1 to Tier&nbsp;2. A second test uses our own sparsity observation: do genes that appear in documented relationships carry more signal than genes that only appear inside findings?</p>
+        <p class="new"><b>New:</b> turns the relationship-versus-finding gap into a dose-response test over network distance.</p>
+      </div>
+      <div class="hyp">
+        <div class="h-id">H5</div>
+        <h3>Incremental value</h3>
+        <p>For any panel that survives H1&ndash;H4, we measure the C-index gain over a clinical model (age, stage, residual tumor) plus known molecular axes (TCGA molecular subtypes, immune, proliferation). We expect most of the gain to disappear; the remainder is the clinically honest number.</p>
+        <p class="new"><b>New:</b> reports the added value of literature knowledge, not its raw association with survival.</p>
+      </div>
     </div>
   </section>
 
-  <!-- 03 STRATEGIES -->
+  <!-- 04 PIPELINE FIGURE -->
   <section>
-    <div class="sec-head"><span class="sec-num">03</span><h2>Three ways to build the panel</h2></div>
-    <p>Each strategy encodes a different belief about where predictive signal lives: in curated biology, in data-driven structure, or in sheer prominence across the literature.</p>
-    <div class="cards">
+    <div class="sec-head"><span class="sec-num">04</span><h2>The design, drawn out</h2></div>
+    <p>Each gene panel is compared against its own matched null on identical folds. The quantity we report is the gap between the panel and the null, not the panel&rsquo;s raw score.</p>
+    <div class="figure">
+      <svg viewBox="0 0 920 330" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+        <g fill="none" stroke-width="2.2" opacity=".55">
+          <path d="M222 50 C 280 50, 290 165, 330 165" stroke="#0f4c5c"/>
+          <path d="M222 125 C 280 125, 290 165, 330 165" stroke="#0f4c5c"/>
+          <path d="M222 205 C 280 205, 290 165, 330 165" stroke="#2a8a99"/>
+          <path d="M222 280 C 280 280, 290 165, 330 165" stroke="#c75b3f"/>
+          <path d="M500 165 L 548 165" stroke="#54666d"/>
+          <path d="M700 165 C 730 165, 730 75, 752 75" stroke="#54666d"/>
+          <path d="M700 165 L 752 165" stroke="#54666d"/>
+          <path d="M700 165 C 730 165, 730 255, 752 255" stroke="#54666d"/>
+        </g>
+        <g>
+          <rect x="22" y="25" width="200" height="50" rx="12" fill="#fff" stroke="#0f4c5c" stroke-width="1.6"/>
+          <text x="38" y="46" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#0f4c5c">LITERATURE · BY TIER</text>
+          <text x="38" y="64" font-size="12.5" fill="#16242b">Seed → Tier 1 → Tier 2</text>
+          <rect x="22" y="100" width="200" height="50" rx="12" fill="#fff" stroke="#0f4c5c" stroke-width="1.6"/>
+          <text x="38" y="121" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#0f4c5c">LITERATURE · BY SOURCE</text>
+          <text x="38" y="139" font-size="12.5" fill="#16242b">Pre-2011 / non-TCGA / TCGA</text>
+          <rect x="22" y="180" width="200" height="50" rx="12" fill="#fff" stroke="#2a8a99" stroke-width="1.6"/>
+          <text x="38" y="201" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#2a8a99">DATA-DRIVEN</text>
+          <text x="38" y="219" font-size="12.5" fill="#16242b">Fold-internal clustering</text>
+          <rect x="22" y="255" width="200" height="50" rx="12" fill="#fff" stroke="#c75b3f" stroke-width="1.6"/>
+          <text x="38" y="276" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#c75b3f">POPULARITY</text>
+          <text x="38" y="294" font-size="12.5" fill="#16242b">Most-cited genes</text>
+        </g>
+        <rect x="330" y="120" width="170" height="90" rx="14" fill="#e3f0f1" stroke="#2a8a99" stroke-width="1.6"/>
+        <text x="415" y="152" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#2a8a99">VERSUS</text>
+        <text x="415" y="174" text-anchor="middle" font-family="Fraunces, serif" font-size="16" font-weight="600" fill="#16242b">Matched null</text>
+        <text x="415" y="193" text-anchor="middle" font-size="11.5" fill="#54666d">1,000+ property-matched sets</text>
+        <rect x="548" y="120" width="152" height="90" rx="14" fill="#0f4c5c"/>
+        <text x="624" y="160" text-anchor="middle" font-family="Fraunces, serif" font-size="16" font-weight="600" fill="#fff">Survival model</text>
+        <text x="624" y="182" text-anchor="middle" font-size="11.5" fill="#cfe6e8">nested CV, same folds</text>
+        <g>
+          <rect x="752" y="50" width="150" height="50" rx="12" fill="#f7e7e1" stroke="#c75b3f" stroke-width="1.4"/>
+          <text x="766" y="71" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="600" fill="#c75b3f">PRIMARY</text>
+          <text x="766" y="89" font-size="12.5" fill="#16242b">Overall survival</text>
+          <rect x="752" y="140" width="150" height="50" rx="12" fill="#e3f0f1" stroke="#2a8a99" stroke-width="1.4"/>
+          <text x="766" y="161" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="600" fill="#2a8a99">SECONDARY</text>
+          <text x="766" y="179" font-size="12.5" fill="#16242b">Progression-free</text>
+          <rect x="752" y="230" width="150" height="50" rx="12" fill="#e3f0f1" stroke="#2a8a99" stroke-width="1.4"/>
+          <text x="766" y="251" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="600" fill="#2a8a99">BINARY</text>
+          <text x="766" y="269" font-size="12.5" fill="#16242b">Platinum resistance</text>
+        </g>
+      </svg>
+      <p class="fig-cap">Each panel is judged by how far it beats its own matched null, on three outcomes.</p>
+    </div>
+  </section>
+
+  <!-- 05 PANELS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>Gene panels</h2></div>
+    <p>The three panels from v1 stay, each refined so it can answer one hypothesis. Two reference arms are added.</p>
+    <div class="cards c4">
       <div class="card s1">
         <span class="c-num">01</span>
         <h3>Literature-structured</h3>
-        <p class="c-src">By tier</p>
-        <p>Genes drawn from the impact network &mdash; seed, Tier&nbsp;1, and Tier&nbsp;2. Testing tiers separately shows whether curated, relationship-aware genes carry signal, and whether reaching deeper into the network adds information or dilutes it.</p>
+        <p class="c-src">By tier and by source</p>
+        <p>Seed, Tier&nbsp;1 and Tier&nbsp;2 from the impact network (H4), each also split by article provenance (H3). The 65-gene seed list was provided by a collaborator; its origin is being traced, because a seed derived from TCGA-OV would make every tier circular.</p>
       </div>
       <div class="card s2">
         <span class="c-num">02</span>
-        <h3>Clustering-derived</h3>
-        <p class="c-src">Dr. Lashmi&rsquo;s set</p>
-        <p>Genes grouped by unsupervised clustering analysis. This asks whether data-driven co-expression structure, learned without reference to the literature, outperforms hand-curated relationships.</p>
+        <h3>Data-driven clustering</h3>
+        <p class="c-src">Fold-internal co-expression</p>
+        <p>Co-expression modules learned only on each training fold, so the arm never sees test patients. An externally supplied clustering set can be added as an extra arm once we confirm which data it was derived from.</p>
       </div>
       <div class="card s3">
         <span class="c-num">03</span>
-        <h3>Frequency-based</h3>
+        <h3>Popularity</h3>
         <p class="c-src">Corpus prominence</p>
-        <p>The genes mentioned most often across the article corpus &mdash; a simple, popularity-driven baseline. If a curated or learned panel can&rsquo;t beat this, the added structure isn&rsquo;t buying much.</p>
+        <p>The most-mentioned genes. Counts are taken from an unrestricted gene extraction, because the current findings extractor keeps only seed-list genes and would make the arm overlap with the seed panel.</p>
+      </div>
+      <div class="card s4">
+        <span class="c-num">04</span>
+        <h3>Reference arms</h3>
+        <p class="c-src">Floor and ceiling</p>
+        <p>Floor: property-matched nulls, plus non-cancer gene sets as negative controls. Ceiling: OTTA-SPOT (101 genes), the strongest published HGSOC expression signature.</p>
       </div>
     </div>
   </section>
 
-  <!-- 04 OUTCOMES & MODELS -->
+  <!-- 06 OUTCOMES -->
   <section>
-    <div class="sec-head"><span class="sec-num">04</span><h2>Outcomes &amp; modeling</h2></div>
-    <p>Survival is modeled two ways so the comparison isn&rsquo;t tied to a single framing of the outcome.</p>
-    <div class="split">
+    <div class="sec-head"><span class="sec-num">06</span><h2>Outcomes &amp; modeling</h2></div>
+    <p>Outcomes follow the TCGA Pan-Cancer Clinical Data Resource (TCGA-CDR). The v1 &ldquo;survives past a horizon&rdquo; label is replaced: it throws away patients censored before the horizon, and platinum resistance is the clinically meaningful binary.</p>
+    <div class="split s3">
       <div class="panel">
-        <span class="tag">Outcome A</span>
-        <h3>Survivability</h3>
-        <p>A binary label &mdash; does the patient survive past a defined horizon? Framed as a classification problem.</p>
-        <div class="models">
-          <span class="chip">Logistic regression</span>
-          <span class="chip">Regularized (L1/L2)</span>
-          <span class="chip">Tree ensembles</span>
-        </div>
+        <span class="tag">Primary</span>
+        <h3>Overall survival</h3>
+        <p>Time to death from any cause, censoring respected.</p>
+        <div class="models"><span class="chip">Cox elastic net</span><span class="chip">Random survival forest</span></div>
       </div>
       <div class="panel">
-        <span class="tag">Outcome B</span>
-        <h3>Months survived</h3>
-        <p>The continuous duration of survival, modeled with time-to-event methods that respect censoring.</p>
-        <div class="models">
-          <span class="chip">Cox PH</span>
-          <span class="chip">Random survival forest</span>
-          <span class="chip">Regression on months</span>
-        </div>
+        <span class="tag">Secondary</span>
+        <h3>Progression-free interval</h3>
+        <p>The TCGA-CDR PFI endpoint, which is better powered than OS in TCGA-OV.</p>
+        <div class="models"><span class="chip">Cox elastic net</span><span class="chip">Random survival forest</span></div>
+      </div>
+      <div class="panel">
+        <span class="tag">Binary</span>
+        <h3>Platinum resistance</h3>
+        <p>Progression within 6 months of completing platinum therapy, from the clinical records.</p>
+        <div class="models"><span class="chip">Regularized logistic</span><span class="chip">Tree ensembles</span></div>
       </div>
     </div>
   </section>
 
-  <!-- 05 EVALUATION -->
+  <!-- 07 VALIDATION -->
   <section>
-    <div class="sec-head"><span class="sec-num">05</span><h2>Evaluation</h2></div>
-    <p>All three panels run through an identical protocol &mdash; same patients, same splits, same metrics &mdash; so the leaderboard reflects gene quality and nothing else.</p>
+    <div class="sec-head"><span class="sec-num">07</span><h2>Validation without external data</h2></div>
+    <p>We replace the external cohort with checks that can each fail independently, all inside TCGA-OV.</p>
+    <ul class="decisions">
+      <li><span class="q">1</span><span class="d-body"><b>Leave-one-site-out CV.</b> <span>TCGA-OV samples come from many tissue source sites. Holding out each site in turn is internal&ndash;external cross-validation, the closest thing to a new hospital.</span></span></li>
+      <li><span class="q">2</span><span class="d-body"><b>Cross-platform transfer.</b> <span>Many TCGA-OV patients were profiled on Affymetrix U133A, Agilent 244K and RNA-seq. Train on one platform, test on another with disjoint patients.</span></span></li>
+      <li><span class="q">3</span><span class="d-body"><b>Temporal holdout.</b> <span>Train on earlier diagnosis years, test on later ones.</span></span></li>
+      <li><span class="q">4</span><span class="d-body"><b>Knowledge-side holdout (H3).</b> <span>Panels built only from literature that predates or does not use TCGA-OV.</span></span></li>
+      <li><span class="q">5</span><span class="d-body"><b>Protein-level check.</b> <span>For panel genes on the RPPA array, test whether protein levels show the same direction of effect.</span></span></li>
+      <li><span class="q">6</span><span class="d-body"><b>Negative controls.</b> <span>Non-cancer gene sets and permuted outcomes must sit at the null.</span></span></li>
+      <li><span class="q">7</span><span class="d-body"><b>Leakage hygiene.</b> <span>Nested, repeated CV. All gene selection, clustering and normalization happen inside training folds.</span></span></li>
+    </ul>
+  </section>
+
+  <!-- 08 METRICS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">08</span><h2>What we report</h2></div>
     <div class="metrics">
       <div class="metric-block">
-        <p class="mh">Binary &middot; survivability</p>
+        <p class="mh">Time-to-event &middot; OS, PFI</p>
         <ul>
-          <li><b>AUROC</b> and <b>AUPRC</b> &mdash; ranking and class-imbalance robustness</li>
-          <li><b>Accuracy &amp; F1</b> at a chosen threshold</li>
-          <li><b>Calibration</b> &mdash; are predicted risks trustworthy?</li>
+          <li><b>Uno&rsquo;s C-index</b> and <b>time-dependent AUC</b> at 3 and 5 years</li>
+          <li><b>&Delta;C over matched null</b>: panel minus null median, with empirical percentile</li>
+          <li><b>&Delta;C over clinical + molecular model</b> (H5)</li>
         </ul>
       </div>
       <div class="metric-block">
-        <p class="mh">Continuous &middot; duration</p>
+        <p class="mh">Binary &middot; platinum resistance</p>
         <ul>
-          <li><b>Harrell&rsquo;s C-index</b> &mdash; concordance of predicted vs. true ordering</li>
-          <li><b>Time-dependent AUC</b> across horizons</li>
-          <li><b>RMSE</b> on predicted months (where uncensored)</li>
+          <li><b>AUROC</b>, <b>AUPRC</b>, <b>F1</b></li>
+          <li><b>Calibration</b> slope and intercept</li>
+          <li>Same &Delta;-over-null framing as above</li>
         </ul>
       </div>
     </div>
     <div class="callout">
-      <p><b>Fair-comparison guardrail.</b> Hold the gene-set size constant across the three strategies &mdash; or report performance as a function of set size. Otherwise a gap could simply reflect how many genes a panel contains rather than how good those genes are. Validation uses repeated, stratified cross-validation with a held-out test set.</p>
+      <p><b>Fair comparison.</b> Effects will be small (expected C around 0.55&ndash;0.62). Every comparison is paired on identical folds, panel size is either matched or swept, and the analysis is pre-registered before results are seen.</p>
     </div>
   </section>
 
-  <!-- 06 OPEN DECISIONS -->
+  <!-- 09 ROADMAP -->
   <section>
-    <div class="sec-head"><span class="sec-num">06</span><h2>Open decisions &amp; next steps</h2></div>
-    <p>A handful of design choices to settle before building the pipeline &mdash; flagged here for discussion.</p>
+    <div class="sec-head"><span class="sec-num">09</span><h2>Roadmap</h2></div>
+    <ol class="steps">
+      <li><span><b>Trace the seed list.</b> Confirm where the 65 genes came from and whether TCGA-OV was involved.</span></li>
+      <li><span><b>Tag the corpus.</b> Extend the LLM extractor to record publication year, cohorts used (TCGA or not), and all genes mentioned, not only seed genes.</span></li>
+      <li><span><b>Lock the cohort.</b> TCGA-OV expression on each platform joined to TCGA-CDR outcomes and platinum status; fix sample counts.</span></li>
+      <li><span><b>Build the matched-null generator</b> and the negative-control sets.</span></li>
+      <li><span><b>Pre-register</b> hypotheses, metrics and thresholds.</span></li>
+      <li><span><b>Run H1&ndash;H5</b> under the validation checks in section 07.</span></li>
+    </ol>
+  </section>
+
+  <!-- 10 OPEN QUESTIONS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">10</span><h2>Open questions for collaborators</h2></div>
     <ul class="decisions">
-      <li><span class="q">?</span><span class="d-body"><b>Cohort &amp; data source.</b> <span>Confirm the patient cohort and feature modality (e.g., TCGA-OV expression and/or mutation profiles joined to clinical survival).</span></span></li>
-      <li><span class="q">?</span><span class="d-body"><b>Binary threshold.</b> <span>Define &ldquo;survives&rdquo; &mdash; median months, or a fixed clinical horizon such as 3- or 5-year survival.</span></span></li>
-      <li><span class="q">?</span><span class="d-body"><b>Gene-set size matching.</b> <span>Decide whether to equalize panel sizes across strategies, or sweep size as a variable.</span></span></li>
-      <li><span class="q">?</span><span class="d-body"><b>A combined arm.</b> <span>Consider a fourth panel from the union or intersection of the three, to see whether the strategies are complementary.</span></span></li>
+      <li><span class="q">?</span><span class="d-body"><b>Seed list origin.</b> <span>Which study or analysis produced the 65 genes, and on which cohort?</span></span></li>
+      <li><span class="q">?</span><span class="d-body"><b>External clustering set.</b> <span>Was it derived on TCGA-OV? If so, it is re-derived inside folds; if not, it is scored as is.</span></span></li>
+      <li><span class="q">?</span><span class="d-body"><b>Combined arm.</b> <span>Is a union or intersection panel worth adding once the single arms are measured against the null?</span></span></li>
     </ul>
   </section>
 
+  <!-- REFERENCES -->
+  <section>
+    <div class="sec-head"><span class="sec-num">&mdash;</span><h2>Key references</h2></div>
+    <ol class="refs">
+      <li>Venet D, Dumont JE, Detours V. Most random gene expression signatures are significantly associated with breast cancer outcome. <i>PLoS Comput Biol</i> 2011. <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3197658/" target="_blank" rel="noopener">link</a></li>
+      <li>Waldron L, et al. Comparative meta-analysis of prognostic gene signatures for late-stage ovarian cancer. <i>J Natl Cancer Inst</i> 2014. <a href="https://pubmed.ncbi.nlm.nih.gov/24700801/" target="_blank" rel="noopener">link</a></li>
+      <li>Shimoni Y. Association between expression of random gene sets and survival is evident in multiple cancer types and may be explained by sub-classification. <i>PLoS Comput Biol</i> 2018. <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5839591/" target="_blank" rel="noopener">link</a></li>
+      <li>Stoeger T, Gerlach M, Morimoto RI, Nunes Amaral LA. Large-scale investigation of the reasons why potentially important genes are ignored. <i>PLoS Biol</i> 2018. <a href="https://pmc.ncbi.nlm.nih.gov/articles/6143198" target="_blank" rel="noopener">link</a></li>
+      <li>Millstein J, et al. Prognostic gene expression signature for high-grade serous ovarian cancer. <i>Ann Oncol</i> 2020. <a href="https://research.bond.edu.au/en/publications/prognostic-gene-expression-signature-for-high-grade-serous-ovaria/" target="_blank" rel="noopener">link</a></li>
+      <li>Liu J, et al. An integrated TCGA Pan-Cancer Clinical Data Resource to drive high-quality survival outcome analytics. <i>Cell</i> 2018. <a href="https://doi.org/10.1016/j.cell.2018.02.052" target="_blank" rel="noopener">link</a></li>
+      <li>Cancer Genome Atlas Research Network. Integrated genomic analyses of ovarian carcinoma. <i>Nature</i> 2011. <a href="https://doi.org/10.1038/nature10166" target="_blank" rel="noopener">link</a></li>
+      <li>Li D, et al. Exploring large language models for feature selection: a data-centric perspective. arXiv 2408.12025, 2024. <a href="https://arxiv.org/abs/2408.12025" target="_blank" rel="noopener">link</a></li>
+      <li>Clinical and cross-domain validation of an LLM-guided, literature-based gene prioritization framework. bioRxiv 2026. <a href="https://www.biorxiv.org/content/10.64898/2026.01.22.701191v1.full" target="_blank" rel="noopener">link</a></li>
+      <li>Mellina Andreu JL, et al. PhenoLinker: phenotypePhenoLinker: phenotype&ndash;gene link prediction with time-sliced HPO releases. arXiv 2402.01809, 2024.ndash;gene link prediction and explanation using heterogeneous graph neural networks. arXiv 2402.01809, 2024. <a href="https://arxiv.org/abs/2402.01809" target="_blank" rel="noopener">link</a></li>
+    </ol>
+  </section>
+
   <footer>
-    <span>Ovarian Cancer Survival &middot; Gene-Set Comparison Study</span>
+    <span>Ovarian Cancer Survival &middot; Research Plan v2</span>
     <span class="mono">Nafiz Imtiaz Khan &middot; DECAL Lab, UC Davis</span>
   </footer>
 
